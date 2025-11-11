@@ -18,6 +18,7 @@ from bpy.props import (StringProperty,
                         BoolProperty,
                         IntProperty,
                         FloatProperty,
+                        EnumProperty,
                         PointerProperty,
                         )
 from bpy.types import (Panel,
@@ -439,8 +440,9 @@ def _apply_settings_to_active(context):
                     pass
             if hasattr(obj, 'collision') and obj.collision:
                 obj.collision.thickness_outer = max(0.0001, getattr(settings, 'extrude_width', 0.3) * 0.5)
-                obj.collision.damping = 0.5
-                obj.collision.cloth_friction = 5.0
+                # Lower friction/damping so strands can slide and knot migrates
+                obj.collision.damping = 0.2
+                obj.collision.cloth_friction = 1.0
             
             # Ensure Soft Body exists and is configured (stretchable, not rigid)
             if 'SOFT_BODY' not in {m.type for m in obj.modifiers}:
@@ -639,6 +641,7 @@ class OBJECT_PT_KnotPanel(Panel):
         col.enabled = myknot.use_physics
         row = box.row(align=True)
         row.operator("knot.add_hooks", icon='HOOK')
+        row.operator("knot.add_force", icon='FORCE_FORCE')
         if myknot.use_physics:
             col.label(text="Press SPACE to simulate", icon='INFO')
 
@@ -660,12 +663,13 @@ class OBJECT_PT_KnotPanel(Panel):
 class KNOT_OT_add_hooks(Operator):
     bl_idname = "knot.add_hooks"
     bl_label = "Add Tighten Hooks"
-    bl_description = "Create two empties hooked to rope ends for physically tightening"
+    bl_description = "Create two empties hooked to rope ends, and a Soft Body goal map so pulling ends tightens the knot"
     bl_options = {'REGISTER', 'UNDO'}
 
     nearest_count: IntProperty(name="End Vert Count", default=30, min=3, max=500)
 
     def execute(self, context):
+        import heapq
         obj = context.object or context.view_layer.objects.active
         if obj is None:
             self.report({'ERROR'}, "Select the knot object first")
@@ -680,10 +684,10 @@ class KNOT_OT_add_hooks(Operator):
         bm = bmesh.new()
         bm.from_mesh(me)
         bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
 
         ends = [v for v in bm.verts if len(v.link_edges) == 1]
         if len(ends) < 2:
-            # fallback: pick extreme vertices along X
             vs = list(bm.verts)
             ends = [min(vs, key=lambda v: v.co.x), max(vs, key=lambda v: v.co.x)]
 
@@ -692,29 +696,64 @@ class KNOT_OT_add_hooks(Operator):
             return obj.matrix_world @ v.co
 
         end_pairs = [(ends[0], 'A'), (ends[-1], 'B')]
+        world_coords = [obj.matrix_world @ v.co for v in bm.verts]
 
+        # Build Hook groups and empties at both ends
+        seed_sets = {}
         for v, tag in end_pairs:
-            # build vertex group of nearest N verts
-            import math
-            coords = [obj.matrix_world @ Vector(vert.co) for vert in bm.verts]
-            dists = sorted([(i, (coords[i] - world_co(v)).length) for i in range(len(coords))], key=lambda x: x[1])
+            dists = sorted([(i, (world_coords[i] - world_co(v)).length) for i in range(len(bm.verts))], key=lambda x: x[1])
             picked = [i for i,_ in dists[:self.nearest_count]]
+            seed_sets[tag] = set(picked)
 
             vg = obj.vertex_groups.new(name=f"Hook_{tag}")
             for i in picked:
                 vg.add([i], 1.0, 'REPLACE')
 
-            # create empty
             empty = bpy.data.objects.new(f"Hook_{tag}", None)
             empty.empty_display_size = 0.2
             empty.empty_display_type = 'PLAIN_AXES'
             empty.location = world_co(v)
             context.collection.objects.link(empty)
 
-            # add hook modifier
             mod = obj.modifiers.new(name=f"Hook_{tag}", type='HOOK')
             mod.object = empty
             mod.vertex_group = vg.name
+
+        # Dijkstra (multi-source) from both ends along edges (world-length weights)
+        def dijkstra(seeds):
+            dist = [1e20]*len(bm.verts)
+            h = []
+            for i in seeds:
+                dist[i] = 0.0
+                heapq.heappush(h, (0.0, i))
+            while h:
+                d,u = heapq.heappop(h)
+                if d!=dist[u]:
+                    continue
+                vu = world_coords[u]
+                for e in bm.verts[u].link_edges:
+                    v = e.other_vert(bm.verts[u]).index
+                    w = (world_coords[v]-vu).length
+                    nd = d + w
+                    if nd < dist[v]:
+                        dist[v] = nd
+                        heapq.heappush(h, (nd, v))
+            return dist
+
+        distA = dijkstra(seed_sets['A'])
+        distB = dijkstra(seed_sets['B'])
+        mind = [min(a,b) for a,b in zip(distA, distB)]
+        maxd = max(x for x in mind if x < 1e10) or 1.0
+        falloff = maxd * 0.35  # 近端权重高，向中部快速衰减
+
+        # Create Soft Body goal group: ends权重≈1，中段≈0.15，可滑动
+        vg_goal = obj.vertex_groups.get('SB_Goal') or obj.vertex_groups.new(name='SB_Goal')
+        for i, d in enumerate(mind):
+            if d >= 1e10:
+                w = 0.15
+            else:
+                w = max(0.15, min(1.0, 1.0 - d/falloff))
+            vg_goal.add([i], w, 'REPLACE')
 
         bm.free()
 
@@ -726,14 +765,92 @@ class KNOT_OT_add_hooks(Operator):
                 pass
         if obj.soft_body:
             sb = obj.soft_body
-            sb.goal_default = max(0.1, context.scene.knot_tool.physics_goal)
             sb.use_edges = True
-            sb.pull = max(0.5, context.scene.knot_tool.physics_stiffness)
-            sb.push = 0.5 * context.scene.knot_tool.physics_stiffness
-            sb.bend = 0.5
             sb.use_self_collision = True
+            # 目标权重沿长度分布：端部接近1，中段低
+            sb.use_goal = True
+            sb.goal_vertex_group = vg_goal.name
+            sb.goal_max = 1.0
+            sb.goal_min = 0.1
+            sb.goal_spring = 0.8
+            # 拉伸/压缩刚度（仍可拉伸，非刚体）
+            sb.pull = max(0.6, context.scene.knot_tool.physics_stiffness)
+            sb.push = 0.5 * max(0.6, context.scene.knot_tool.physics_stiffness)
+            sb.bend = 0.5
+            # 自碰撞球半径基于绳半径
+            try:
+                sb.ball_size = max(0.0001, getattr(context.scene.knot_tool, 'extrude_width', 0.3) * 0.5)
+                sb.ball_stiff = 0.7
+                sb.ball_damp = 0.8
+            except Exception:
+                pass
 
-        self.report({'INFO'}, "Created two hook empties. Move them or animate to tighten the rope.")
+        # Ensure collision modifier exists and has thickness
+        if 'COLLISION' not in {m.type for m in obj.modifiers}:
+            try:
+                bpy.ops.object.modifier_add(type='COLLISION')
+            except Exception:
+                pass
+        if hasattr(obj, 'collision') and obj.collision:
+            obj.collision.thickness_outer = max(0.0001, getattr(context.scene.knot_tool, 'extrude_width', 0.3) * 0.5)
+            obj.collision.damping = 0.5
+            obj.collision.cloth_friction = 5.0
+
+        self.report({'INFO'}, "Hooks created and Soft Body goal map set. Pull hooks and press Space to simulate.")
+        return {'FINISHED'}
+
+
+class KNOT_OT_add_force(Operator):
+    bl_idname = "knot.add_force"
+    bl_label = "Add Force Pull"
+    bl_description = "Add a directional force field aligned with the two hooks to pull the rope across space"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    type: EnumProperty(
+        name="Type",
+        items=[('WIND','Wind','Directional wind'), ('FORCE','Force','Radial force')],
+        default='WIND'
+    )
+    strength: FloatProperty(name="Strength", default=50.0, min=0.0, max=10000.0)
+    distance: FloatProperty(name="Distance Max", default=0.0, min=0.0, max=1000.0, description="Max distance for effect (0=unlimited)")
+
+    def execute(self, context):
+        # Find hooks
+        hooks = [o for o in context.scene.objects if o.name.startswith("Hook_")]
+        a = next((o for o in hooks if o.name.startswith("Hook_A")), None)
+        b = next((o for o in hooks if o.name.startswith("Hook_B")), None)
+        if not a or not b:
+            self.report({'ERROR'}, "Create hooks first")
+            return {'CANCELLED'}
+
+        # Compute mid-point and direction A->B
+        mid = (a.location + b.location) * 0.5
+        dir_vec = (b.location - a.location).copy()
+        if dir_vec.length == 0:
+            dir_vec = Vector((1,0,0))
+        dir_vec.normalize()
+
+        # Create an Empty and configure as a field (avoid relying on ops returning context.object)
+        eff = bpy.data.objects.new("KnotForce", None)
+        eff.location = mid
+        context.collection.objects.link(eff)
+
+        # Ensure field data exists and set parameters
+        fld = getattr(eff, 'field', None)
+        if fld is None:
+            self.report({'ERROR'}, "Failed to create field on object")
+            return {'CANCELLED'}
+        fld.type = self.type
+        fld.strength = self.strength
+        fld.distance_max = self.distance
+
+        # WIND should blow along object +Y; rotate +Y to A->B
+        if self.type == 'WIND':
+            eff.rotation_mode = 'QUAT'
+            q = Vector((0,1,0)).rotation_difference(dir_vec)
+            eff.rotation_quaternion = q
+
+        self.report({'INFO'}, f"Added {self.type} field. Play animation to see effect.")
         return {'FINISHED'}
 
 
@@ -742,6 +859,7 @@ classes = [
     OBJECT_PT_KnotPanel,
     KnotOperator,
     KNOT_OT_add_hooks,
+    KNOT_OT_add_force,
 ]
     
 
