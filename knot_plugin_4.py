@@ -2,7 +2,7 @@ bl_info = {
     "name": "Knot generator",
     "description": """Creates 3D meshes of knots from simple ASCII art descriptions.""",
     "author": "John H. Williamson",
-    "version": (0, 0, 6),
+    "version": (0, 0, 7),
     "blender": (4, 0, 0),
     "location": "3D View > Sidebar > Knot", 
     "warning": "",
@@ -213,7 +213,6 @@ class Knot:
 
 ### Blender Python interface
 class KnotSettings(PropertyGroup):
-    # Blender 4.0+ 属性定义方式
     
     knot_text: StringProperty(
         name="Knot",
@@ -281,8 +280,9 @@ class KnotSettings(PropertyGroup):
         max=1
     )
     
+    # 新增收紧选项
     tighten: BoolProperty(
-        name="Tighten Knot",
+        name="Auto Tighten",
         description="Apply modifiers to tighten the knot automatically",
         default=False
     )
@@ -300,6 +300,29 @@ class KnotSettings(PropertyGroup):
         description="Offset for shrinkwrap effect",
         default=0.1,
         min=-1.0,
+        max=1.0
+    )
+    
+    # 物理模拟选项
+    use_physics: BoolProperty(
+        name="Setup Physics",
+        description="Setup collision and soft body physics for realistic tightening",
+        default=False
+    )
+    
+    physics_goal: FloatProperty(
+        name="Physics Goal",
+        description="Soft body goal strength (lower = more flexible)",
+        default=0.5,
+        min=0.0,
+        max=1.0
+    )
+    
+    physics_stiffness: FloatProperty(
+        name="Edge Stiffness",
+        description="How stiff the knot edges are",
+        default=0.5,
+        min=0.0,
         max=1.0
     )
         
@@ -339,6 +362,77 @@ class KnotOperator(Operator, AddObjectHelper):
     bl_idname = "wm.make_knot"
     bl_label = "Make Knot"
     bl_options = {'REGISTER', 'UNDO'}
+
+
+class UpdateKnotModifiers(Operator):
+    """Update tighten and physics settings on existing knot"""
+    bl_idname = "wm.update_knot_modifiers"
+    bl_label = "Update Settings"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    def execute(self, context):
+        scene = context.scene
+        active = context.object
+        
+        if not active or active.type not in {'MESH', 'CURVE'}:
+            self.report({'ERROR'}, "Please select a knot object first!")
+            return {'CANCELLED'}
+        
+        if not hasattr(scene, 'knot_tool'):
+            self.report({'ERROR'}, "Knot settings not found!")
+            return {'CANCELLED'}
+            
+        knottool = scene.knot_tool
+        
+        # 清除现有的相关修改器
+        mods_to_remove = []
+        for mod in active.modifiers:
+            if mod.type in {'SIMPLE_DEFORM', 'SHRINKWRAP', 'COLLISION', 'SOFT_BODY'}:
+                mods_to_remove.append(mod.name)
+        
+        for mod_name in mods_to_remove:
+            active.modifiers.remove(active.modifiers[mod_name])
+        
+        # 重新应用Tighten修改器
+        if knottool.tighten:
+            bpy.ops.object.modifier_add(type="SIMPLE_DEFORM")
+            if 'SimpleDeform' in active.modifiers:
+                simple_mod = active.modifiers['SimpleDeform']
+                simple_mod.deform_method = 'TAPER'
+                simple_mod.factor = -knottool.tighten_strength * 0.3
+                simple_mod.deform_axis = 'Z'
+            
+            bpy.ops.object.modifier_add(type="SHRINKWRAP")
+            if 'Shrinkwrap' in active.modifiers:
+                shrink_mod = active.modifiers['Shrinkwrap']
+                shrink_mod.target = active
+                shrink_mod.wrap_method = 'NEAREST_SURFACEPOINT'
+                shrink_mod.offset = knottool.shrinkwrap_offset
+        
+        # 重新应用Physics设置
+        if knottool.use_physics:
+            bpy.ops.object.modifier_add(type="COLLISION")
+            if hasattr(active, 'collision'):
+                active.collision.thickness_outer = knottool.extrude_width * 0.5
+                active.collision.damping = 0.8
+            
+            bpy.ops.object.modifier_add(type="SOFT_BODY")
+            if active.soft_body:
+                sb = active.soft_body
+                sb.goal_default = knottool.physics_goal
+                sb.goal_min = knottool.physics_goal * 0.5
+                sb.goal_spring = 0.5
+                
+                sb.use_edges = True
+                sb.pull = knottool.physics_stiffness
+                sb.push = knottool.physics_stiffness * 0.5
+                sb.bend = 0.5
+                
+                sb.use_self_collision = True
+                sb.self_collision_friction = 0.5
+        
+        self.report({'INFO'}, "Knot settings updated!")
+        return {'FINISHED'}
 
     def execute(self, context):
         scene = context.scene
@@ -393,6 +487,24 @@ class KnotOperator(Operator, AddObjectHelper):
         # Modifiers
         if active.type in {'MESH', 'CURVE'}:
             
+            # 自动收紧修改器
+            if knottool.tighten:
+                # Simple Deform for tapering effect
+                bpy.ops.object.modifier_add(type="SIMPLE_DEFORM")
+                if 'SimpleDeform' in active.modifiers:
+                    simple_mod = active.modifiers['SimpleDeform']
+                    simple_mod.deform_method = 'TAPER'
+                    simple_mod.factor = -knottool.tighten_strength * 0.3
+                    simple_mod.deform_axis = 'Z'
+                
+                # Shrinkwrap for self-collision
+                bpy.ops.object.modifier_add(type="SHRINKWRAP")
+                if 'Shrinkwrap' in active.modifiers:
+                    shrink_mod = active.modifiers['Shrinkwrap']
+                    shrink_mod.target = active
+                    shrink_mod.wrap_method = 'NEAREST_SURFACEPOINT'
+                    shrink_mod.offset = knottool.shrinkwrap_offset
+            
             if knottool.smoothing > 0:
                 bpy.ops.object.modifier_add(type="SMOOTH")
                 if 'Smooth' in active.modifiers:
@@ -403,6 +515,35 @@ class KnotOperator(Operator, AddObjectHelper):
                 if 'Subdivision' in active.modifiers:
                     active.modifiers['Subdivision'].levels = knottool.subdiv
                     active.modifiers['Subdivision'].render_levels = knottool.subdiv
+        
+        # 物理模拟设置
+        if knottool.use_physics and active.type in {'MESH', 'CURVE'}:
+            # 添加Collision修改器
+            bpy.ops.object.modifier_add(type="COLLISION")
+            if hasattr(active, 'collision'):
+                active.collision.thickness_outer = knottool.extrude_width * 0.5
+                active.collision.damping = 0.8
+            
+            # 添加Soft Body物理
+            bpy.ops.object.modifier_add(type="SOFT_BODY")
+            if active.soft_body:
+                sb = active.soft_body
+                # Goal设置
+                sb.goal_default = knottool.physics_goal
+                sb.goal_min = knottool.physics_goal * 0.5
+                sb.goal_spring = 0.5
+                
+                # Edge设置
+                sb.use_edges = True
+                sb.pull = knottool.physics_stiffness
+                sb.push = knottool.physics_stiffness * 0.5
+                sb.bend = 0.5
+                
+                # Collision设置
+                sb.use_self_collision = True
+                sb.self_collision_friction = 0.5
+                
+                self.report({'INFO'}, "Physics setup complete! Press SPACEBAR to simulate.")
 
         # Recenter origin
         bpy.ops.object.mode_set(mode='EDIT')
@@ -443,22 +584,44 @@ class OBJECT_PT_KnotPanel(Panel):
         
         if not hasattr(scene, 'knot_tool'):
             layout.label(text="Error: Knot Tool not loaded", icon='ERROR')
-            layout.operator("wm.console_toggle", text="Check Console for Errors")
             return
             
         myknot = scene.knot_tool
 
         layout.prop(myknot, "scale")
         
+        # ASCII定义
         box = layout.box()
         box.label(text="ASCII Knot Definition", icon='TEXT')
         box.prop_search(myknot, 'knot_text', bpy.data, 'texts', text="Text Block")
         
+        # Z轴设置
         box = layout.box()
         box.label(text="Over/Under Z shift", icon='DRIVER_DISTANCE')
         box.prop(myknot, "z_depth")
         box.prop(myknot, "z_bias")
+        
+        # 收紧设置 - 新增！
+        box = layout.box()
+        box.label(text="Tighten Settings", icon='FORCE_MAGNETIC')
+        box.prop(myknot, "tighten")
+        col = box.column(align=True)
+        col.prop(myknot, "tighten_strength")
+        col.prop(myknot, "shrinkwrap_offset")
+        col.enabled = myknot.tighten
+        
+        # 物理模拟设置 - 新增！
+        box = layout.box()
+        box.label(text="Physics Simulation", icon='PHYSICS')
+        box.prop(myknot, "use_physics")
+        col = box.column(align=True)
+        col.prop(myknot, "physics_goal")
+        col.prop(myknot, "physics_stiffness")
+        col.enabled = myknot.use_physics
+        if myknot.use_physics:
+            col.label(text="Press SPACE to simulate", icon='INFO')
 
+        # 输出选项
         box = layout.box()
         box.label(text="Output Options", icon='OUTLINER_OB_CURVE')
         box.prop(myknot, "curve")
