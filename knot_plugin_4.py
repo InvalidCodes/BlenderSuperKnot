@@ -425,6 +425,24 @@ def _apply_settings_to_active(context):
 
         # Physics
         if settings.use_physics:
+            # Remove geometric tighten to avoid "melt" effect
+            for m in list(obj.modifiers):
+                if m.type == 'SIMPLE_DEFORM':
+                    obj.modifiers.remove(m)
+
+            # Ensure Collision modifier for volume separation
+            col = next((m for m in obj.modifiers if m.type == 'COLLISION'), None)
+            if col is None:
+                try:
+                    bpy.ops.object.modifier_add(type='COLLISION')
+                except Exception:
+                    pass
+            if hasattr(obj, 'collision') and obj.collision:
+                obj.collision.thickness_outer = max(0.0001, getattr(settings, 'extrude_width', 0.3) * 0.5)
+                obj.collision.damping = 0.5
+                obj.collision.cloth_friction = 5.0
+            
+            # Ensure Soft Body exists and is configured (stretchable, not rigid)
             if 'SOFT_BODY' not in {m.type for m in obj.modifiers}:
                 try:
                     bpy.ops.object.modifier_add(type='SOFT_BODY')
@@ -436,14 +454,14 @@ def _apply_settings_to_active(context):
                 sb.goal_min = max(0.0, settings.physics_goal * 0.5)
                 sb.goal_spring = 0.5
                 sb.use_edges = True
-                sb.pull = settings.physics_stiffness
-                sb.push = settings.physics_stiffness * 0.5
+                sb.pull = max(0.0, settings.physics_stiffness)
+                sb.push = 0.5 * max(0.0, settings.physics_stiffness)
                 sb.bend = 0.5
                 sb.use_self_collision = True
         else:
-            # Remove soft body if present
+            # Remove soft body and collision if present
             for m in list(obj.modifiers):
-                if m.type == 'SOFT_BODY':
+                if m.type in {'SOFT_BODY','COLLISION'}:
                     obj.modifiers.remove(m)
 
     # Tag depsgraph update
@@ -598,14 +616,18 @@ class OBJECT_PT_KnotPanel(Panel):
         box.prop(myknot, "z_depth")
         box.prop(myknot, "z_bias")
         
-        # 收紧设置 - 新增！
+        # 收紧设置 - 在开启物理时禁用几何收紧
         box = layout.box()
         box.label(text="Tighten Settings", icon='FORCE_MAGNETIC')
+        if myknot.use_physics:
+            row = box.row()
+            row.label(text="Disabled while Physics is ON (use hooks + playback)", icon='INFO')
+            box.enabled = False
         box.prop(myknot, "tighten")
         col = box.column(align=True)
         col.prop(myknot, "tighten_strength")
         col.prop(myknot, "shrinkwrap_offset")
-        col.enabled = myknot.tighten
+        col.enabled = myknot.tighten and not myknot.use_physics
         
         # 物理模拟设置 - 新增！
         box = layout.box()
