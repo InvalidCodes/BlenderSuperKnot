@@ -27,6 +27,7 @@ from bpy.types import (Panel,
 
 from bpy_extras.object_utils import AddObjectHelper, object_data_add
 from mathutils import Vector
+import bmesh
 
 
 char_dirs = {"^":(0,-1), "V":(0,1), ">":(1,0), "<":(-1,0), "O":(0,0)}
@@ -212,6 +213,13 @@ class Knot:
 ### END knot parsing
 
 ### Blender Python interface
+
+def _on_prop_update(self, context):
+    try:
+        _apply_settings_to_active(context)
+    except Exception:
+        pass
+
 class KnotSettings(PropertyGroup):
     
     knot_text: StringProperty(
@@ -267,7 +275,7 @@ class KnotSettings(PropertyGroup):
     z_depth: FloatProperty(
         name="Depth",
         description="Z shift at crossovers",
-        default=1,
+        default=1.5,
         min=0,
         max=10
     )
@@ -284,7 +292,8 @@ class KnotSettings(PropertyGroup):
     tighten: BoolProperty(
         name="Auto Tighten",
         description="Apply modifiers to tighten the knot automatically",
-        default=False
+        default=False,
+        update=_on_prop_update
     )
     
     tighten_strength: FloatProperty(
@@ -292,7 +301,8 @@ class KnotSettings(PropertyGroup):
         description="How much to tighten the knot (higher = tighter)",
         default=0.5,
         min=0.0,
-        max=2.0
+        max=2.0,
+        update=_on_prop_update
     )
     
     shrinkwrap_offset: FloatProperty(
@@ -300,14 +310,16 @@ class KnotSettings(PropertyGroup):
         description="Offset for shrinkwrap effect",
         default=0.1,
         min=-1.0,
-        max=1.0
+        max=1.0,
+        update=_on_prop_update
     )
     
     # 物理模拟选项
     use_physics: BoolProperty(
         name="Setup Physics",
         description="Setup collision and soft body physics for realistic tightening",
-        default=False
+        default=False,
+        update=_on_prop_update
     )
     
     physics_goal: FloatProperty(
@@ -315,7 +327,8 @@ class KnotSettings(PropertyGroup):
         description="Soft body goal strength (lower = more flexible)",
         default=0.5,
         min=0.0,
-        max=1.0
+        max=1.0,
+        update=_on_prop_update
     )
     
     physics_stiffness: FloatProperty(
@@ -323,7 +336,8 @@ class KnotSettings(PropertyGroup):
         description="How stiff the knot edges are",
         default=0.5,
         min=0.0,
-        max=1.0
+        max=1.0,
+        update=_on_prop_update
     )
         
     
@@ -358,81 +372,89 @@ def add_knot(self, context, knot_string, z_scale, bias, scale, name="Knot"):
     object_data_add(context, mesh, operator=self)
     
     
+# Apply tighten/physics/smoothing/subdiv settings to the active object based on current panel values
+# Safe to call from property update callbacks
+
+def _apply_settings_to_active(context):
+    scene = context.scene
+    if not hasattr(scene, 'knot_tool'):
+        return
+    settings = scene.knot_tool
+    obj = context.object or context.view_layer.objects.active
+    if obj is None:
+        return
+
+    # Ensure we work on mesh when features require it
+    if (settings.tighten or settings.use_physics) and obj.type == 'CURVE':
+        try:
+            bpy.ops.object.convert(target='MESH')
+            obj = context.object or obj
+        except Exception:
+            pass
+
+    # Tighten modifiers
+    if obj.type == 'MESH':
+        # Simple Deform (TAPER on Z)
+        sdef = next((m for m in obj.modifiers if m.type == 'SIMPLE_DEFORM'), None)
+        if settings.tighten:
+            if sdef is None:
+                sdef = obj.modifiers.new(name='SimpleDeform', type='SIMPLE_DEFORM')
+            sdef.deform_method = 'TAPER'
+            sdef.deform_axis = 'Z'
+            sdef.factor = -settings.tighten_strength * 0.3
+        elif sdef is not None:
+            obj.modifiers.remove(sdef)
+
+        # Smooth modifier for rounding
+        sm = next((m for m in obj.modifiers if m.type == 'SMOOTH'), None)
+        if sm is None and (settings.smoothing > 0 or settings.tighten):
+            sm = obj.modifiers.new(name='Smooth', type='SMOOTH')
+        if sm is not None:
+            sm.iterations = max(0, int(settings.smoothing))
+            sm.factor = min(1.0, 0.5 + settings.tighten_strength * 0.4) if settings.tighten else 0.5
+
+        # Subdivision
+        sub = next((m for m in obj.modifiers if m.type == 'SUBSURF'), None)
+        if settings.subdiv > 0:
+            if sub is None:
+                sub = obj.modifiers.new(name='Subdivision', type='SUBSURF')
+            sub.levels = int(settings.subdiv)
+            sub.render_levels = int(settings.subdiv)
+        elif sub is not None:
+            obj.modifiers.remove(sub)
+
+        # Physics
+        if settings.use_physics:
+            if 'SOFT_BODY' not in {m.type for m in obj.modifiers}:
+                try:
+                    bpy.ops.object.modifier_add(type='SOFT_BODY')
+                except Exception:
+                    pass
+            if obj.soft_body:
+                sb = obj.soft_body
+                sb.goal_default = settings.physics_goal
+                sb.goal_min = max(0.0, settings.physics_goal * 0.5)
+                sb.goal_spring = 0.5
+                sb.use_edges = True
+                sb.pull = settings.physics_stiffness
+                sb.push = settings.physics_stiffness * 0.5
+                sb.bend = 0.5
+                sb.use_self_collision = True
+        else:
+            # Remove soft body if present
+            for m in list(obj.modifiers):
+                if m.type == 'SOFT_BODY':
+                    obj.modifiers.remove(m)
+
+    # Tag depsgraph update
+    if obj.data:
+        obj.data.update()
+
+
 class KnotOperator(Operator, AddObjectHelper):
     bl_idname = "wm.make_knot"
     bl_label = "Make Knot"
     bl_options = {'REGISTER', 'UNDO'}
-
-
-class UpdateKnotModifiers(Operator):
-    """Update tighten and physics settings on existing knot"""
-    bl_idname = "wm.update_knot_modifiers"
-    bl_label = "Update Settings"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    def execute(self, context):
-        scene = context.scene
-        active = context.object
-        
-        if not active or active.type not in {'MESH', 'CURVE'}:
-            self.report({'ERROR'}, "Please select a knot object first!")
-            return {'CANCELLED'}
-        
-        if not hasattr(scene, 'knot_tool'):
-            self.report({'ERROR'}, "Knot settings not found!")
-            return {'CANCELLED'}
-            
-        knottool = scene.knot_tool
-        
-        # 清除现有的相关修改器
-        mods_to_remove = []
-        for mod in active.modifiers:
-            if mod.type in {'SIMPLE_DEFORM', 'SHRINKWRAP', 'COLLISION', 'SOFT_BODY'}:
-                mods_to_remove.append(mod.name)
-        
-        for mod_name in mods_to_remove:
-            active.modifiers.remove(active.modifiers[mod_name])
-        
-        # 重新应用Tighten修改器
-        if knottool.tighten:
-            bpy.ops.object.modifier_add(type="SIMPLE_DEFORM")
-            if 'SimpleDeform' in active.modifiers:
-                simple_mod = active.modifiers['SimpleDeform']
-                simple_mod.deform_method = 'TAPER'
-                simple_mod.factor = -knottool.tighten_strength * 0.3
-                simple_mod.deform_axis = 'Z'
-            
-            bpy.ops.object.modifier_add(type="SHRINKWRAP")
-            if 'Shrinkwrap' in active.modifiers:
-                shrink_mod = active.modifiers['Shrinkwrap']
-                shrink_mod.target = active
-                shrink_mod.wrap_method = 'NEAREST_SURFACEPOINT'
-                shrink_mod.offset = knottool.shrinkwrap_offset
-        
-        # 重新应用Physics设置
-        if knottool.use_physics:
-            bpy.ops.object.modifier_add(type="COLLISION")
-            if hasattr(active, 'collision'):
-                active.collision.thickness_outer = knottool.extrude_width * 0.5
-                active.collision.damping = 0.8
-            
-            bpy.ops.object.modifier_add(type="SOFT_BODY")
-            if active.soft_body:
-                sb = active.soft_body
-                sb.goal_default = knottool.physics_goal
-                sb.goal_min = knottool.physics_goal * 0.5
-                sb.goal_spring = 0.5
-                
-                sb.use_edges = True
-                sb.pull = knottool.physics_stiffness
-                sb.push = knottool.physics_stiffness * 0.5
-                sb.bend = 0.5
-                
-                sb.use_self_collision = True
-                sb.self_collision_friction = 0.5
-        
-        self.report({'INFO'}, "Knot settings updated!")
-        return {'FINISHED'}
 
     def execute(self, context):
         scene = context.scene
@@ -471,50 +493,25 @@ class UpdateKnotModifiers(Operator):
         active.select_set(True)
         context.view_layer.objects.active = active
 
-        # Convert mesh to curve
+        # Convert to curve if requested
         if knottool.curve:
             bpy.ops.object.convert(target="CURVE")
-            
             active = context.object
             if active and active.type == 'CURVE':
                 curves = active.data
-                
                 curves.fill_mode = 'FULL'
                 curves.bevel_depth = knottool.extrude_width         
                 curves.bevel_resolution = 6
                 curves.use_uv_as_generated = True
-        
-        # Modifiers
-        if active.type in {'MESH', 'CURVE'}:
-            
-            # 自动收紧修改器
-            if knottool.tighten:
-                # Simple Deform for tapering effect
-                bpy.ops.object.modifier_add(type="SIMPLE_DEFORM")
-                if 'SimpleDeform' in active.modifiers:
-                    simple_mod = active.modifiers['SimpleDeform']
-                    simple_mod.deform_method = 'TAPER'
-                    simple_mod.factor = -knottool.tighten_strength * 0.3
-                    simple_mod.deform_axis = 'Z'
-                
-                # Shrinkwrap for self-collision
-                bpy.ops.object.modifier_add(type="SHRINKWRAP")
-                if 'Shrinkwrap' in active.modifiers:
-                    shrink_mod = active.modifiers['Shrinkwrap']
-                    shrink_mod.target = active
-                    shrink_mod.wrap_method = 'NEAREST_SURFACEPOINT'
-                    shrink_mod.offset = knottool.shrinkwrap_offset
-            
-            if knottool.smoothing > 0:
-                bpy.ops.object.modifier_add(type="SMOOTH")
-                if 'Smooth' in active.modifiers:
-                    active.modifiers['Smooth'].iterations = knottool.smoothing          
-                
-            if knottool.subdiv > 0 and active.type == 'MESH':
-                bpy.ops.object.modifier_add(type="SUBSURF")
-                if 'Subdivision' in active.modifiers:
-                    active.modifiers['Subdivision'].levels = knottool.subdiv
-                    active.modifiers['Subdivision'].render_levels = knottool.subdiv
+
+        # Ensure mesh for tighten/physics if required
+        active = context.object
+        if (knottool.tighten or knottool.use_physics) and active and active.type == 'CURVE':
+            bpy.ops.object.convert(target='MESH')
+            active = context.object
+
+        # Apply settings to active object (adds/updates modifiers and physics)
+        _apply_settings_to_active(context)
         
         # 物理模拟设置
         if knottool.use_physics and active.type in {'MESH', 'CURVE'}:
@@ -618,6 +615,8 @@ class OBJECT_PT_KnotPanel(Panel):
         col.prop(myknot, "physics_goal")
         col.prop(myknot, "physics_stiffness")
         col.enabled = myknot.use_physics
+        row = box.row(align=True)
+        row.operator("knot.add_hooks", icon='HOOK')
         if myknot.use_physics:
             col.label(text="Press SPACE to simulate", icon='INFO')
 
@@ -636,10 +635,91 @@ class OBJECT_PT_KnotPanel(Panel):
         layout.operator("wm.make_knot", icon='CURVE_DATA', text="Generate Knot")
         
         
+class KNOT_OT_add_hooks(Operator):
+    bl_idname = "knot.add_hooks"
+    bl_label = "Add Tighten Hooks"
+    bl_description = "Create two empties hooked to rope ends for physically tightening"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    nearest_count: IntProperty(name="End Vert Count", default=30, min=3, max=500)
+
+    def execute(self, context):
+        obj = context.object or context.view_layer.objects.active
+        if obj is None:
+            self.report({'ERROR'}, "Select the knot object first")
+            return {'CANCELLED'}
+
+        # Convert to mesh if needed
+        if obj.type == 'CURVE':
+            bpy.ops.object.convert(target='MESH')
+            obj = context.object
+
+        me = obj.data
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        bm.verts.ensure_lookup_table()
+
+        ends = [v for v in bm.verts if len(v.link_edges) == 1]
+        if len(ends) < 2:
+            # fallback: pick extreme vertices along X
+            vs = list(bm.verts)
+            ends = [min(vs, key=lambda v: v.co.x), max(vs, key=lambda v: v.co.x)]
+
+        # world coordinates for empties
+        def world_co(v):
+            return obj.matrix_world @ v.co
+
+        end_pairs = [(ends[0], 'A'), (ends[-1], 'B')]
+
+        for v, tag in end_pairs:
+            # build vertex group of nearest N verts
+            import math
+            coords = [obj.matrix_world @ Vector(vert.co) for vert in bm.verts]
+            dists = sorted([(i, (coords[i] - world_co(v)).length) for i in range(len(coords))], key=lambda x: x[1])
+            picked = [i for i,_ in dists[:self.nearest_count]]
+
+            vg = obj.vertex_groups.new(name=f"Hook_{tag}")
+            for i in picked:
+                vg.add([i], 1.0, 'REPLACE')
+
+            # create empty
+            empty = bpy.data.objects.new(f"Hook_{tag}", None)
+            empty.empty_display_size = 0.2
+            empty.empty_display_type = 'PLAIN_AXES'
+            empty.location = world_co(v)
+            context.collection.objects.link(empty)
+
+            # add hook modifier
+            mod = obj.modifiers.new(name=f"Hook_{tag}", type='HOOK')
+            mod.object = empty
+            mod.vertex_group = vg.name
+
+        bm.free()
+
+        # Ensure physics present
+        if 'SOFT_BODY' not in {m.type for m in obj.modifiers}:
+            try:
+                bpy.ops.object.modifier_add(type='SOFT_BODY')
+            except Exception:
+                pass
+        if obj.soft_body:
+            sb = obj.soft_body
+            sb.goal_default = max(0.1, context.scene.knot_tool.physics_goal)
+            sb.use_edges = True
+            sb.pull = max(0.5, context.scene.knot_tool.physics_stiffness)
+            sb.push = 0.5 * context.scene.knot_tool.physics_stiffness
+            sb.bend = 0.5
+            sb.use_self_collision = True
+
+        self.report({'INFO'}, "Created two hook empties. Move them or animate to tighten the rope.")
+        return {'FINISHED'}
+
+
 classes = [
     KnotSettings,
     OBJECT_PT_KnotPanel,
-    KnotOperator
+    KnotOperator,
+    KNOT_OT_add_hooks,
 ]
     
 
