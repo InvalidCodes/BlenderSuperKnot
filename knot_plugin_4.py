@@ -280,6 +280,28 @@ class KnotSettings(PropertyGroup):
         min=-1,
         max=1
     )
+    
+    tighten: BoolProperty(
+        name="Tighten Knot",
+        description="Apply modifiers to tighten the knot automatically",
+        default=False
+    )
+    
+    tighten_strength: FloatProperty(
+        name="Tighten Strength",
+        description="How much to tighten the knot (higher = tighter)",
+        default=0.5,
+        min=0.0,
+        max=2.0
+    )
+    
+    shrinkwrap_offset: FloatProperty(
+        name="Shrinkwrap Offset",
+        description="Offset for shrinkwrap effect",
+        default=0.1,
+        min=-1.0,
+        max=1.0
+    )
         
     
 def add_knot(self, context, knot_string, z_scale, bias, scale, name="Knot"):
