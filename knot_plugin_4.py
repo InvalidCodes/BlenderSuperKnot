@@ -340,6 +340,13 @@ class KnotSettings(PropertyGroup):
         max=1.0,
         update=_on_prop_update
     )
+
+    physics_use_cloth: BoolProperty(
+        name="Use Cloth Solver",
+        description="Use cloth simulation with self-collision instead of soft body",
+        default=True,
+        update=_on_prop_update
+    )
         
     
 def add_knot(self, context, knot_string, z_scale, bias, scale, name="Knot"):
@@ -443,27 +450,70 @@ def _apply_settings_to_active(context):
                 # Lower friction/damping so strands can slide and knot migrates
                 obj.collision.damping = 0.2
                 obj.collision.cloth_friction = 1.0
-            
-            # Ensure Soft Body exists and is configured (stretchable, not rigid)
-            if 'SOFT_BODY' not in {m.type for m in obj.modifiers}:
-                try:
-                    bpy.ops.object.modifier_add(type='SOFT_BODY')
-                except Exception:
-                    pass
-            if obj.soft_body:
-                sb = obj.soft_body
-                sb.goal_default = settings.physics_goal
-                sb.goal_min = max(0.0, settings.physics_goal * 0.5)
-                sb.goal_spring = 0.5
-                sb.use_edges = True
-                sb.pull = max(0.0, settings.physics_stiffness)
-                sb.push = 0.5 * max(0.0, settings.physics_stiffness)
-                sb.bend = 0.5
-                sb.use_self_collision = True
+            cloth_mod = next((m for m in obj.modifiers if m.type == 'CLOTH'), None)
+            soft_mod = next((m for m in obj.modifiers if m.type == 'SOFT_BODY'), None)
+
+            if settings.physics_use_cloth:
+                if soft_mod is not None:
+                    obj.modifiers.remove(soft_mod)
+                    soft_mod = None
+                if cloth_mod is None:
+                    try:
+                        bpy.ops.object.modifier_add(type='CLOTH')
+                    except Exception:
+                        cloth_mod = None
+                    else:
+                        cloth_mod = next((m for m in obj.modifiers if m.type == 'CLOTH'), None)
+                if cloth_mod is not None:
+                    cloth_settings = cloth_mod.settings
+                    cloth_settings.quality = max(5, int(8 + settings.physics_stiffness * 12))
+                    cloth_settings.mass = max(0.002, getattr(settings, 'extrude_width', 0.3) * 0.02)
+                    cloth_settings.air_damping = 0.02
+                    stiffness = max(5.0, 20.0 * max(settings.physics_stiffness, 0.1))
+                    cloth_settings.tension_stiffness = stiffness
+                    cloth_settings.compression_stiffness = stiffness
+                    cloth_settings.shear_stiffness = stiffness * 0.5
+                    cloth_settings.bending_stiffness = 0.5
+                    cloth_settings.use_internal_springs = True
+                    cloth_settings.internal_friction = 5.0
+                    cloth_settings.pin_stiffness = max(0.5, settings.physics_stiffness)
+                    vg_pin = obj.vertex_groups.get('Cloth_Pin')
+                    if vg_pin:
+                        cloth_settings.use_pin_cloth = True
+                        cloth_settings.vertex_group_mass = vg_pin.name
+                    else:
+                        cloth_settings.use_pin_cloth = False
+                        cloth_settings.vertex_group_mass = ""
+
+                    cloth_col = cloth_mod.collision_settings
+                    cloth_col.use_self_collision = True
+                    cloth_col.self_friction = 5.0
+                    cloth_col.self_distance_min = max(0.0005, getattr(settings, 'extrude_width', 0.3) * 0.25)
+                    cloth_col.distance_min = max(0.0005, getattr(settings, 'extrude_width', 0.3) * 0.25)
+                    cloth_col.collision_quality = max(3, int(4 + settings.physics_stiffness * 6))
+            else:
+                if cloth_mod is not None:
+                    obj.modifiers.remove(cloth_mod)
+                # Ensure Soft Body exists and is configured (stretchable, not rigid)
+                if 'SOFT_BODY' not in {m.type for m in obj.modifiers}:
+                    try:
+                        bpy.ops.object.modifier_add(type='SOFT_BODY')
+                    except Exception:
+                        pass
+                if obj.soft_body:
+                    sb = obj.soft_body
+                    sb.goal_default = settings.physics_goal
+                    sb.goal_min = max(0.0, settings.physics_goal * 0.5)
+                    sb.goal_spring = 0.5
+                    sb.use_edges = True
+                    sb.pull = max(0.0, settings.physics_stiffness)
+                    sb.push = 0.5 * max(0.0, settings.physics_stiffness)
+                    sb.bend = 0.5
+                    sb.use_self_collision = True
         else:
             # Remove soft body and collision if present
             for m in list(obj.modifiers):
-                if m.type in {'SOFT_BODY','COLLISION'}:
+                if m.type in {'SOFT_BODY','COLLISION','CLOTH'}:
                     obj.modifiers.remove(m)
 
     # Tag depsgraph update
@@ -639,9 +689,12 @@ class OBJECT_PT_KnotPanel(Panel):
         col.prop(myknot, "physics_goal")
         col.prop(myknot, "physics_stiffness")
         col.enabled = myknot.use_physics
+        if myknot.use_physics:
+            box.prop(myknot, "physics_use_cloth")
         row = box.row(align=True)
         row.operator("knot.add_hooks", icon='HOOK')
-        row.operator("knot.add_force", icon='FORCE_FORCE')
+        row.operator("knot.add_pull_forces", icon='FORCE_FORCE')
+        row.operator("knot.auto_tighten", icon='ANIM')
         if myknot.use_physics:
             col.label(text="Press SPACE to simulate", icon='INFO')
 
@@ -700,10 +753,12 @@ class KNOT_OT_add_hooks(Operator):
 
         # Build Hook groups and empties at both ends
         seed_sets = {}
+        pinned_indices = set()
         for v, tag in end_pairs:
             dists = sorted([(i, (world_coords[i] - world_co(v)).length) for i in range(len(bm.verts))], key=lambda x: x[1])
             picked = [i for i,_ in dists[:self.nearest_count]]
             seed_sets[tag] = set(picked)
+            pinned_indices.update(picked)
 
             vg = obj.vertex_groups.new(name=f"Hook_{tag}")
             for i in picked:
@@ -755,6 +810,14 @@ class KNOT_OT_add_hooks(Operator):
                 w = max(0.15, min(1.0, 1.0 - d/falloff))
             vg_goal.add([i], w, 'REPLACE')
 
+        vg_pin = obj.vertex_groups.get('Cloth_Pin')
+        if vg_pin is None:
+            vg_pin = obj.vertex_groups.new(name='Cloth_Pin')
+        else:
+            vg_pin.remove(range(len(bm.verts)))
+        for i in pinned_indices:
+            vg_pin.add([i], 1.0, 'REPLACE')
+
         bm.free()
 
         # Ensure physics present
@@ -769,7 +832,7 @@ class KNOT_OT_add_hooks(Operator):
             sb.use_self_collision = True
             # 目标权重沿长度分布：端部接近1，中段低
             sb.use_goal = True
-            sb.goal_vertex_group = vg_goal.name
+            sb.vertex_group_goal = vg_goal.name
             sb.goal_max = 1.0
             sb.goal_min = 0.1
             sb.goal_spring = 0.8
@@ -784,6 +847,16 @@ class KNOT_OT_add_hooks(Operator):
                 sb.ball_damp = 0.8
             except Exception:
                 pass
+
+        cloth_mod = next((m for m in obj.modifiers if m.type == 'CLOTH'), None)
+        if cloth_mod:
+            cloth_settings = cloth_mod.settings
+            cloth_settings.use_pin_cloth = True
+            cloth_settings.vertex_group_mass = vg_pin.name
+            cloth_settings.pin_stiffness = max(0.5, context.scene.knot_tool.physics_stiffness)
+            cloth_col = cloth_mod.collision_settings
+            cloth_col.use_self_collision = True
+            cloth_col.self_friction = 5.0
 
         # Ensure collision modifier exists and has thickness
         if 'COLLISION' not in {m.type for m in obj.modifiers}:
@@ -800,19 +873,36 @@ class KNOT_OT_add_hooks(Operator):
         return {'FINISHED'}
 
 
-class KNOT_OT_add_force(Operator):
-    bl_idname = "knot.add_force"
-    bl_label = "Add Force Pull"
-    bl_description = "Add a directional force field aligned with the two hooks to pull the rope across space"
+class KNOT_OT_add_pull_forces(Operator):
+    bl_idname = "knot.add_pull_forces"
+    bl_label = "Add Pull Forces"
+    bl_description = "Disable Hook deformation and add Force fields directly on Hook_A/B for physical pulling"
     bl_options = {'REGISTER', 'UNDO'}
 
-    type: EnumProperty(
-        name="Type",
-        items=[('WIND','Wind','Directional wind'), ('FORCE','Force','Radial force')],
-        default='WIND'
-    )
-    strength: FloatProperty(name="Strength", default=50.0, min=0.0, max=10000.0)
-    distance: FloatProperty(name="Distance Max", default=0.0, min=0.0, max=1000.0, description="Max distance for effect (0=unlimited)")
+    strength: FloatProperty(name="Force Strength", default=200.0, min=0.0, max=100000.0)
+    falloff_power: FloatProperty(name="Falloff", default=2.0, min=0.0, max=10.0)
+
+    def _ensure_force(self, context, obj):
+        # Robustly add a force field to obj using operator (creates field data if missing)
+        prev_active = context.view_layer.objects.active
+        prev_sel = [o for o in context.selected_objects]
+        try:
+            for o in prev_sel:
+                o.select_set(False)
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+            bpy.ops.object.forcefield_toggle()
+        finally:
+            obj.select_set(False)
+            for o in prev_sel:
+                o.select_set(True)
+            context.view_layer.objects.active = prev_active
+        # Now set settings if field exists
+        if getattr(obj, 'field', None) is not None:
+            obj.field.type = 'FORCE'
+            obj.field.strength = self.strength
+            obj.field.falloff_power = self.falloff_power
+            obj.field.use_max_distance = False
 
     def execute(self, context):
         # Find hooks
@@ -823,34 +913,153 @@ class KNOT_OT_add_force(Operator):
             self.report({'ERROR'}, "Create hooks first")
             return {'CANCELLED'}
 
-        # Compute mid-point and direction A->B
-        mid = (a.location + b.location) * 0.5
-        dir_vec = (b.location - a.location).copy()
-        if dir_vec.length == 0:
-            dir_vec = Vector((1,0,0))
-        dir_vec.normalize()
+        # Disable Hook modifiers on the active rope so forces (not direct deformation) drive the motion
+        rope = context.object or context.view_layer.objects.active
+        if rope and rope.type == 'MESH':
+            for m in rope.modifiers:
+                if m.type == 'HOOK' and (m.name.startswith('Hook_A') or m.name.startswith('Hook_B')):
+                    m.strength = 0.0
 
-        # Create an Empty and configure as a field (avoid relying on ops returning context.object)
-        eff = bpy.data.objects.new("KnotForce", None)
-        eff.location = mid
-        context.collection.objects.link(eff)
+        # Add force fields directly to the hooks (empties)
+        self._ensure_force(context, a)
+        self._ensure_force(context, b)
 
-        # Ensure field data exists and set parameters
-        fld = getattr(eff, 'field', None)
-        if fld is None:
-            self.report({'ERROR'}, "Failed to create field on object")
+        self.report({'INFO'}, "Added FORCE fields to Hook_A/Hook_B. Move/animate hooks to apply physical forces.")
+        return {'FINISHED'}
+
+
+class KNOT_OT_auto_tighten(Operator):
+    bl_idname = "knot.auto_tighten"
+    bl_label = "Auto Tighten"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    frames: IntProperty(name="Frames", default=120, min=5, max=5000)
+    distance: FloatProperty(name="Distance", default=2.0, min=0.0, max=100.0)
+
+    def execute(self, context):
+        scene = context.scene
+
+        # Collect hook empties (created by add_hooks)
+        hooks = sorted([o for o in scene.objects if o.name.startswith("Hook_")], key=lambda o: o.name)
+        if len(hooks) < 2:
+            result = bpy.ops.knot.add_hooks('EXEC_DEFAULT')
+            if 'FINISHED' not in result:
+                self.report({'ERROR'}, "Failed to create hooks")
+                return {'CANCELLED'}
+            hooks = sorted([o for o in scene.objects if o.name.startswith("Hook_")], key=lambda o: o.name)
+
+        if len(hooks) < 2:
+            self.report({'ERROR'}, "No hook empties found")
             return {'CANCELLED'}
-        fld.type = self.type
-        fld.strength = self.strength
-        fld.distance_max = self.distance
 
-        # WIND should blow along object +Y; rotate +Y to A->B
-        if self.type == 'WIND':
-            eff.rotation_mode = 'QUAT'
-            q = Vector((0,1,0)).rotation_difference(dir_vec)
-            eff.rotation_quaternion = q
+        # Try to find the rope object (prefer active object, otherwise search modifiers referencing hooks)
+        rope = context.object
+        if rope in hooks or rope is None:
+            rope = next((obj for obj in scene.objects
+                         if any(mod.type == 'HOOK' and mod.object in hooks for mod in obj.modifiers)),
+                        None)
 
-        self.report({'INFO'}, f"Added {self.type} field. Play animation to see effect.")
+        if rope is None:
+            self.report({'ERROR'}, "Cannot locate knot object. Select the rope mesh and retry.")
+            return {'CANCELLED'}
+
+        if rope.type == 'CURVE':
+            try:
+                prev_active = context.view_layer.objects.active
+                bpy.ops.object.select_all(action='DESELECT')
+                rope.select_set(True)
+                context.view_layer.objects.active = rope
+                bpy.ops.object.convert(target='MESH')
+            except Exception:
+                self.report({'ERROR'}, "Failed to convert curve to mesh for auto tighten")
+                return {'CANCELLED'}
+            finally:
+                new_active = context.view_layer.objects.active
+                rope = new_active if new_active and new_active.type == 'MESH' else rope
+
+        if rope.type != 'MESH':
+            self.report({'ERROR'}, "Auto tighten only supports mesh knots")
+            return {'CANCELLED'}
+
+        # Ensure physics settings applied if enabled so simulation responds to animation
+        _apply_settings_to_active(context)
+
+        # Determine if we should use force-field mode (hook modifiers strength ~0)
+        hook_mods = [m for m in rope.modifiers if m.type == 'HOOK' and m.object in hooks]
+        force_mode = not any(m.strength > 0.001 for m in hook_mods)
+        if force_mode:
+            result = bpy.ops.knot.add_pull_forces('EXEC_DEFAULT')
+            if 'FINISHED' not in result:
+                self.report({'ERROR'}, "Failed to add pull forces")
+                return {'CANCELLED'}
+
+        # Compute knot center in world space
+        if rope.bound_box:
+            center_local = Vector((0.0, 0.0, 0.0))
+            for corner in rope.bound_box:
+                center_local += Vector(corner)
+            center_local /= 8.0
+            center = rope.matrix_world @ center_local
+        else:
+            center = rope.matrix_world.translation.copy()
+
+        start_frame = scene.frame_current
+        total_frames = max(1, int(self.frames))
+        end_frame = start_frame + total_frames
+        mid_frame = start_frame + max(1, total_frames // 2)
+        pull_distance = max(0.0, float(self.distance))
+
+        # prepare animation data
+        initial_locations = {}
+        for hook in hooks:
+            initial_locations[hook.name] = hook.location.copy()
+
+        # Keyframe start
+        scene.frame_set(start_frame)
+        for hook in hooks:
+            hook.location = initial_locations[hook.name].copy()
+            hook.keyframe_insert(data_path="location", frame=start_frame)
+
+        # Keyframe midpoint (ease-in)
+        mid_ratio = 0.6
+        scene.frame_set(mid_frame)
+        for hook in hooks:
+            initial = initial_locations[hook.name]
+            direction = (initial - center)
+            if direction.length < 1e-5:
+                direction = Vector((1.0, 0.0, 0.0))
+            direction.normalize()
+            hook.location = initial + direction * pull_distance * mid_ratio
+            hook.keyframe_insert(data_path="location", frame=mid_frame)
+
+        # Keyframe end (full distance)
+        scene.frame_set(end_frame)
+        for hook in hooks:
+            initial = initial_locations[hook.name]
+            direction = (initial - center)
+            if direction.length < 1e-5:
+                direction = Vector((1.0, 0.0, 0.0))
+            direction.normalize()
+            hook.location = initial + direction * pull_distance
+            hook.keyframe_insert(data_path="location", frame=end_frame)
+
+        # Ensure smooth interpolation
+        for hook in hooks:
+            if hook.animation_data and hook.animation_data.action:
+                for fcurve in hook.animation_data.action.fcurves:
+                    for key in fcurve.keyframe_points:
+                        key.interpolation = 'BEZIER'
+                        key.handle_left_type = 'AUTO'
+                        key.handle_right_type = 'AUTO'
+
+        # Adjust timeline to match animation
+        scene.frame_start = start_frame
+        scene.frame_end = max(scene.frame_end, end_frame)
+        scene.frame_set(start_frame)
+
+        mode_label = "force fields" if force_mode else "hook deformation"
+        self.report({'INFO'}, f"Auto tighten animation created ({mode_label}) from frame {start_frame} to {end_frame}.")
+
         return {'FINISHED'}
 
 
@@ -859,7 +1068,8 @@ classes = [
     OBJECT_PT_KnotPanel,
     KnotOperator,
     KNOT_OT_add_hooks,
-    KNOT_OT_add_force,
+    KNOT_OT_add_pull_forces,
+    KNOT_OT_auto_tighten,
 ]
     
 
