@@ -344,7 +344,7 @@ class KnotSettings(PropertyGroup):
     physics_use_cloth: BoolProperty(
         name="Use Cloth Solver",
         description="Use cloth simulation with self-collision instead of soft body",
-        default=True,
+        default=False,
         update=_on_prop_update
     )
         
@@ -402,6 +402,9 @@ def _apply_settings_to_active(context):
 
     # Tighten modifiers
     if obj.type == 'MESH':
+        mesh = obj.data
+        mesh_has_faces = bool(getattr(mesh, "polygons", None)) and len(mesh.polygons) > 0
+
         # Simple Deform (TAPER on Z)
         sdef = next((m for m in obj.modifiers if m.type == 'SIMPLE_DEFORM'), None)
         if settings.tighten:
@@ -436,6 +439,8 @@ def _apply_settings_to_active(context):
 
         # Physics
         if settings.use_physics:
+            use_cloth_sim = settings.physics_use_cloth and mesh_has_faces
+
             # Ensure Collision modifier for volume separation
             col = next((m for m in obj.modifiers if m.type == 'COLLISION'), None)
             if col is None:
@@ -451,7 +456,7 @@ def _apply_settings_to_active(context):
             cloth_mod = next((m for m in obj.modifiers if m.type == 'CLOTH'), None)
             soft_mod = next((m for m in obj.modifiers if m.type == 'SOFT_BODY'), None)
 
-            if settings.physics_use_cloth:
+            if use_cloth_sim:
                 if soft_mod is not None:
                     obj.modifiers.remove(soft_mod)
                     soft_mod = None
@@ -500,14 +505,19 @@ def _apply_settings_to_active(context):
                         pass
                 if obj.soft_body:
                     sb = obj.soft_body
-                    sb.goal_default = settings.physics_goal
-                    sb.goal_min = max(0.0, settings.physics_goal * 0.5)
-                    sb.goal_spring = 0.5
+                    # 保持绳子形态：提升 goal 与刚度
+                    stiffness = max(0.65, settings.physics_stiffness)
+                    sb.goal_default = max(0.6, settings.physics_goal)
+                    sb.goal_min = max(0.4, settings.physics_goal * 0.6)
+                    sb.goal_spring = 0.9
                     sb.use_edges = True
-                    sb.pull = max(0.0, settings.physics_stiffness)
-                    sb.push = 0.5 * max(0.0, settings.physics_stiffness)
-                    sb.bend = 0.5
+                    sb.pull = stiffness
+                    sb.push = stiffness * 0.8
+                    sb.bend = max(0.6, stiffness)
                     sb.use_self_collision = True
+                    sb.use_goal = True
+                    if obj.vertex_groups.get('SB_Goal'):
+                        sb.vertex_group_goal = 'SB_Goal'
 
             # Keep viewport density low during simulation
             if sub_name:
