@@ -1,7 +1,7 @@
 bl_info = {
-    "name": "Knot generator",
+    "name": "Blender Knot Tight Plugin",
     "description": """Creates 3D meshes of knots from simple ASCII art descriptions.""",
-    "author": "John H. Williamson",
+    "author": "Yunfei Ge & John H. Williamson",
     "version": (0, 0, 7),
     "blender": (4, 0, 0),
     "location": "3D View > Sidebar > Knot", 
@@ -268,7 +268,7 @@ class KnotSettings(PropertyGroup):
     subdiv: IntProperty(
         name="Subdivision",
         description="Number of subdivisions to apply",
-        default=5,
+        default=2,
         min=0,
         max=30
     )
@@ -420,6 +420,7 @@ def _apply_settings_to_active(context):
         if sm is not None:
             sm.iterations = max(0, int(settings.smoothing))
             sm.factor = min(1.0, 0.5 + settings.tighten_strength * 0.4) if settings.tighten else 0.5
+        sm_name = sm.name if sm is not None else None
 
         # Subdivision
         sub = next((m for m in obj.modifiers if m.type == 'SUBSURF'), None)
@@ -430,14 +431,11 @@ def _apply_settings_to_active(context):
             sub.render_levels = int(settings.subdiv)
         elif sub is not None:
             obj.modifiers.remove(sub)
+            sub = None
+        sub_name = sub.name if sub is not None else None
 
         # Physics
         if settings.use_physics:
-            # Remove geometric tighten to avoid "melt" effect
-            for m in list(obj.modifiers):
-                if m.type == 'SIMPLE_DEFORM':
-                    obj.modifiers.remove(m)
-
             # Ensure Collision modifier for volume separation
             col = next((m for m in obj.modifiers if m.type == 'COLLISION'), None)
             if col is None:
@@ -510,11 +508,34 @@ def _apply_settings_to_active(context):
                     sb.push = 0.5 * max(0.0, settings.physics_stiffness)
                     sb.bend = 0.5
                     sb.use_self_collision = True
+
+            # Keep viewport density low during simulation
+            if sub_name:
+                sub_mod = obj.modifiers.get(sub_name)
+                if sub_mod:
+                    sub_mod.show_viewport = False
+                    sub_mod.show_render = True
+            if sm_name:
+                sm_mod = obj.modifiers.get(sm_name)
+                if sm_mod:
+                    sm_mod.show_viewport = True
         else:
             # Remove soft body and collision if present
             for m in list(obj.modifiers):
                 if m.type in {'SOFT_BODY','COLLISION','CLOTH'}:
                     obj.modifiers.remove(m)
+            if sub_name:
+                sub_mod = obj.modifiers.get(sub_name)
+                if sub_mod:
+                    sub_mod.show_viewport = True
+                    sub_mod.show_render = True
+
+        # Ensure Smooth/Subsurf ordered after physics modifiers
+        ordered_names = [name for name in (sm_name, sub_name) if name and obj.modifiers.get(name)]
+        for name in ordered_names:
+            idx = obj.modifiers.find(name)
+            if idx != -1:
+                obj.modifiers.move(idx, len(obj.modifiers) - 1)
 
     # Tag depsgraph update
     if obj.data:
