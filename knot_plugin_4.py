@@ -479,14 +479,23 @@ def _apply_settings_to_active(context):
                     cloth_settings.bending_stiffness = 0.5
                     cloth_settings.use_internal_springs = True
                     cloth_settings.internal_friction = 5.0
-                    cloth_settings.pin_stiffness = max(0.5, settings.physics_stiffness)
+                    if hasattr(cloth_settings, "pin_stiffness"):
+                        cloth_settings.pin_stiffness = max(0.5, settings.physics_stiffness)
                     vg_pin = obj.vertex_groups.get('Cloth_Pin')
                     if vg_pin:
-                        cloth_settings.use_pin_cloth = True
-                        cloth_settings.vertex_group_mass = vg_pin.name
+                        if hasattr(cloth_settings, "use_pin_cloth"):
+                            cloth_settings.use_pin_cloth = True
+                        elif hasattr(cloth_settings, "use_pin"):
+                            cloth_settings.use_pin = True
+                        if hasattr(cloth_settings, "vertex_group_mass"):
+                            cloth_settings.vertex_group_mass = vg_pin.name
                     else:
-                        cloth_settings.use_pin_cloth = False
-                        cloth_settings.vertex_group_mass = ""
+                        if hasattr(cloth_settings, "use_pin_cloth"):
+                            cloth_settings.use_pin_cloth = False
+                        elif hasattr(cloth_settings, "use_pin"):
+                            cloth_settings.use_pin = False
+                        if hasattr(cloth_settings, "vertex_group_mass"):
+                            cloth_settings.vertex_group_mass = ""
 
                     cloth_col = cloth_mod.collision_settings
                     cloth_col.use_self_collision = True
@@ -507,17 +516,29 @@ def _apply_settings_to_active(context):
                     sb = obj.soft_body
                     # 保持绳子形态：提升 goal 与刚度
                     stiffness = max(0.65, settings.physics_stiffness)
-                    sb.goal_default = max(0.6, settings.physics_goal)
-                    sb.goal_min = max(0.4, settings.physics_goal * 0.6)
-                    sb.goal_spring = 0.9
+                    sb.goal_default = max(0.75, settings.physics_goal)
+                    sb.goal_min = max(0.6, settings.physics_goal * 0.8)
+                    sb.goal_max = 1.0
+                    sb.goal_spring = 0.95
+                    if hasattr(sb, "goal_friction"):
+                        sb.goal_friction = 0.1
                     sb.use_edges = True
                     sb.pull = stiffness
-                    sb.push = stiffness * 0.8
-                    sb.bend = max(0.6, stiffness)
+                    sb.push = stiffness * 0.85
+                    sb.bend = max(0.75, stiffness)
                     sb.use_self_collision = True
+                    if hasattr(sb, "ball_size"):
+                        sb.ball_size = max(0.001, getattr(settings, 'extrude_width', 0.3) * 0.4)
+                    if hasattr(sb, "ball_stiff"):
+                        sb.ball_stiff = 0.9
+                    if hasattr(sb, "ball_damp"):
+                        sb.ball_damp = 0.5
                     sb.use_goal = True
-                    if obj.vertex_groups.get('SB_Goal'):
-                        sb.vertex_group_goal = 'SB_Goal'
+                    vg_goal = obj.vertex_groups.get('SB_Goal')
+                    if vg_goal:
+                        sb.vertex_group_goal = vg_goal.name
+                    if hasattr(sb, "gravity"):
+                        sb.gravity = 0.0
 
             # Keep viewport density low during simulation
             if sub_name:
@@ -949,7 +970,7 @@ class KNOT_OT_add_pull_forces(Operator):
         if rope and rope.type == 'MESH':
             for m in rope.modifiers:
                 if m.type == 'HOOK' and (m.name.startswith('Hook_A') or m.name.startswith('Hook_B')):
-                    m.strength = 0.0
+                    m.strength = 1.0
 
         # Add force fields directly to the hooks (empties)
         self._ensure_force(context, a)
