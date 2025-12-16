@@ -29,6 +29,7 @@ from bpy.types import (Panel,
 from bpy_extras.object_utils import AddObjectHelper, object_data_add
 from mathutils import Vector
 import bmesh
+import json
 
 
 char_dirs = {"^":(0,-1), "V":(0,1), ">":(1,0), "<":(-1,0), "O":(0,0)}
@@ -213,6 +214,41 @@ class Knot:
         
 ### END knot parsing
 
+    def compute_gauss_code(self):
+        """
+        Return Gauss code extracted from the parsed ASCII diagram.
+        Each crossing gets a deterministic id; we emit +id for over,
+        -id for under along each oriented lead.
+        Output: (sequences, crossing_ids, crossing_verts_by_id) where
+            sequences: list of lists of signed ints (one per lead)
+            crossing_ids: {(x,y): id}
+            crossing_verts_by_id: {id: [vertex_ix_over, vertex_ix_under, ...]}
+        """
+        # Identify crossings and give them stable indices (row-major)
+        crossings = [(coord, entries) for coord, entries in self.over_map.items() if len(entries) > 1]
+        crossings_sorted = sorted(crossings, key=lambda c: (c[0][1], c[0][0]))
+        crossing_ids = {coord: idx + 1 for idx, (coord, _) in enumerate(crossings_sorted)}
+        crossing_verts_by_id = {}
+        for coord, entries in crossings_sorted:
+            cid = crossing_ids[coord]
+            # entries are (ix, dx, dy, z); ix corresponds to the vertex index created by add_knot
+            crossing_verts_by_id[cid] = [int(e[0]) for e in entries]
+
+        sequences = []
+        for lead in self.leads:
+            seq = []
+            for x, y, dx, dy, z, name in lead:
+                cid = crossing_ids.get((x, y))
+                if cid is None:
+                    continue
+                # z == -1 marks the under strand
+                sign = -1 if z == -1 else 1
+                seq.append(sign * cid)
+            if seq:
+                sequences.append(seq)
+
+        return sequences, crossing_ids, crossing_verts_by_id
+
 ### Blender Python interface
 
 def _on_prop_update(self, context):
@@ -357,6 +393,8 @@ def add_knot(self, context, knot_string, z_scale, bias, scale, name="Knot"):
     
     knot_obj = Knot(knot_string)
     
+    gauss_sequences, crossing_ids, crossing_verts_by_id = knot_obj.compute_gauss_code()
+
     if len(knot_obj.leads)<1:
         raise KnotException("Warning: no valid knot found")         
     
@@ -377,7 +415,51 @@ def add_knot(self, context, knot_string, z_scale, bias, scale, name="Knot"):
     mesh = bpy.data.meshes.new(name=name)
     mesh.from_pydata(verts, edges, [])    
     mesh.validate(verbose=True)
-    object_data_add(context, mesh, operator=self)
+    obj = object_data_add(context, mesh, operator=self)
+
+    # Store Gauss code as ID properties for downstream export (e.g., MuJoCo)
+    if gauss_sequences:
+        mesh["gauss_code"] = ";".join(",".join(f"{v:+d}" for v in seq) for seq in gauss_sequences)
+    if crossing_ids:
+        mesh["gauss_crossings"] = ";".join(f"{cid}:{pos[0]},{pos[1]}" for pos, cid in crossing_ids.items())
+        mesh["gauss_num_crossings"] = int(len(crossing_ids))
+    if gauss_sequences:
+        mesh["gauss_num_components"] = int(len(gauss_sequences))
+    if crossing_verts_by_id:
+        mesh["gauss_crossing_verts"] = ";".join(
+            f"{cid}:" + ",".join(str(ix) for ix in sorted(set(vs)))
+            for cid, vs in sorted(crossing_verts_by_id.items(), key=lambda kv: kv[0])
+        )
+    # Also attach to the created object for convenience
+    if obj:
+        if gauss_sequences:
+            obj["gauss_code"] = mesh["gauss_code"]
+        if crossing_ids:
+            obj["gauss_crossings"] = mesh["gauss_crossings"]
+            obj["gauss_num_crossings"] = int(mesh.get("gauss_num_crossings", 0))
+        if gauss_sequences:
+            obj["gauss_num_components"] = int(mesh.get("gauss_num_components", 0))
+        if crossing_verts_by_id:
+            obj["gauss_crossing_verts"] = mesh.get("gauss_crossing_verts", "")
+        _append_gauss_label(obj.name, gauss_sequences, crossing_ids)
+
+
+def _append_gauss_label(obj_name, gauss_sequences, crossing_ids):
+    """Persist Gauss code as JSONL inside a Blender Text block for offline labeling."""
+    if not gauss_sequences and not crossing_ids:
+        return
+    payload = {
+        "object": obj_name,
+        "gauss_code": gauss_sequences,
+        "num_crossings": int(len(crossing_ids)),
+        "num_components": int(len(gauss_sequences)),
+        "crossings": [{"id": cid, "pos": [int(pos[0]), int(pos[1])]} for pos, cid in crossing_ids.items()],
+    }
+    try:
+        txt = bpy.data.texts.get("knot_gauss_labels.jsonl") or bpy.data.texts.new("knot_gauss_labels.jsonl")
+        txt.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[Knot] Failed to record Gauss label: {e}")
     
     
 # Apply tighten/physics/smoothing/subdiv settings to the active object based on current panel values
@@ -763,6 +845,31 @@ class OBJECT_PT_KnotPanel(Panel):
         col.enabled = myknot.extrude
             
         layout.operator("wm.make_knot", icon='CURVE_DATA', text="Generate Knot")
+
+        # ---- Gauss debug UI for the active object (Level 1: Blender-side labeling) ----
+        obj = context.object or context.view_layer.objects.active
+        if obj is not None and ("gauss_code" in obj or (getattr(obj, "data", None) and "gauss_code" in obj.data)):
+            box = layout.box()
+            box.label(text="Gauss Code (Debug)", icon='SORTALPHA')
+
+            # Prefer object properties; fall back to mesh data properties
+            gauss_code_key = '["gauss_code"]' if "gauss_code" in obj else None
+            gauss_code_mesh_key = '["gauss_code"]' if getattr(obj, "data", None) and "gauss_code" in obj.data else None
+
+            num_crossings = int(obj.get("gauss_num_crossings", getattr(obj.data, "get", lambda *_: 0)("gauss_num_crossings", 0)))
+            num_components = int(obj.get("gauss_num_components", getattr(obj.data, "get", lambda *_: 0)("gauss_num_components", 0)))
+            row = box.row(align=True)
+            row.label(text=f"Crossings: {num_crossings} | Components: {num_components}")
+
+            row = box.row(align=True)
+            row.operator("knot.label_crossings", icon='EMPTY_AXIS', text="Label Crossings")
+
+            # Copy-friendly field (ID property string)
+            col = box.column(align=True)
+            if gauss_code_key:
+                col.prop(obj, gauss_code_key, text="gauss_code")
+            elif gauss_code_mesh_key:
+                col.prop(obj.data, gauss_code_mesh_key, text="gauss_code")
         
         
 class KNOT_OT_add_hooks(Operator):
@@ -1122,6 +1229,110 @@ class KNOT_OT_auto_tighten(Operator):
         return {'FINISHED'}
 
 
+class KNOT_OT_label_crossings(Operator):
+    bl_idname = "knot.label_crossings"
+    bl_label = "Label Crossings"
+    bl_description = "Create/update Empty labels (C1, C2, ...) at each Gauss crossing position for visual debugging"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    size: FloatProperty(name="Label Size", default=0.15, min=0.01, max=10.0)
+    clear_existing: BoolProperty(name="Clear Existing", default=False)
+
+    def execute(self, context):
+        obj = context.object or context.view_layer.objects.active
+        if obj is None or obj.type not in {'MESH', 'CURVE'}:
+            self.report({'ERROR'}, "Select the knot object first (mesh preferred).")
+            return {'CANCELLED'}
+
+        # Prefer mapping stored on the object; fall back to mesh
+        mapping = obj.get("gauss_crossing_verts", "") or (obj.data.get("gauss_crossing_verts", "") if getattr(obj, "data", None) else "")
+        if not mapping:
+            self.report({'ERROR'}, "No gauss_crossing_verts found. Regenerate the knot to compute crossing labels.")
+            return {'CANCELLED'}
+
+        if obj.type != 'MESH':
+            self.report({'ERROR'}, "Crossing labels require a mesh object (convert to mesh first).")
+            return {'CANCELLED'}
+
+        # Optionally clear old labels for this object
+        prefix = f"{obj.name}_C"
+        if self.clear_existing:
+            for o in list(context.scene.objects):
+                if o.name.startswith(prefix) and o.get("knot_crossing_label_owner") == obj.name:
+                    try:
+                        bpy.data.objects.remove(o, do_unlink=True)
+                    except Exception:
+                        pass
+
+        # Parse "id:ix,ix;id:ix,ix"
+        id_to_verts = {}
+        for part in mapping.split(";"):
+            part = part.strip()
+            if not part or ":" not in part:
+                continue
+            sid, sverts = part.split(":", 1)
+            try:
+                cid = int(sid)
+            except Exception:
+                continue
+            verts = []
+            for tok in sverts.split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                try:
+                    verts.append(int(tok))
+                except Exception:
+                    pass
+            if verts:
+                id_to_verts[cid] = verts
+
+        if not id_to_verts:
+            self.report({'ERROR'}, "Failed to parse gauss_crossing_verts mapping.")
+            return {'CANCELLED'}
+
+        me = obj.data
+        created = 0
+        updated = 0
+
+        for cid, vixs in sorted(id_to_verts.items(), key=lambda kv: kv[0]):
+            # Representative position: average of listed vertex coords (local space)
+            coords = []
+            for ix in vixs:
+                if 0 <= ix < len(me.vertices):
+                    coords.append(me.vertices[ix].co.copy())
+            if not coords:
+                continue
+            local = Vector((0.0, 0.0, 0.0))
+            for c in coords:
+                local += c
+            local /= float(len(coords))
+            world = obj.matrix_world @ local
+
+            label_name = f"{prefix}{cid}"
+            label = bpy.data.objects.get(label_name)
+            if label is None:
+                label = bpy.data.objects.new(label_name, None)
+                label.empty_display_type = 'PLAIN_AXES'
+                label.empty_display_size = float(self.size)
+                context.collection.objects.link(label)
+                created += 1
+            else:
+                updated += 1
+
+            label.location = world
+            label["knot_crossing_label"] = int(cid)
+            label["knot_crossing_label_owner"] = obj.name
+            # Parent for organization (keep world transform)
+            try:
+                label.parent = obj
+                label.matrix_parent_inverse = obj.matrix_world.inverted()
+            except Exception:
+                pass
+
+        self.report({'INFO'}, f"Crossing labels: created {created}, updated {updated}.")
+        return {'FINISHED'}
+
 classes = [
     KnotSettings,
     OBJECT_PT_KnotPanel,
@@ -1129,6 +1340,7 @@ classes = [
     KNOT_OT_add_hooks,
     KNOT_OT_add_pull_forces,
     KNOT_OT_auto_tighten,
+    KNOT_OT_label_crossings,
 ]
     
 
