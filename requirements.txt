@@ -1,0 +1,14 @@
+# Requirements for the MuJoCo stage (`python -m superknot simulate`).
+#
+# The Blender stages need no Python packages beyond Blender's own bundled
+# interpreter, and the knot/Gauss-code layer needs nothing at all -- it is
+# plain Python and runs on a bare interpreter.
+
+mujoco>=3.0
+numpy>=1.24
+
+# Video encoding.  imageio-ffmpeg gives H.264/yuv420p, which browsers and IDE
+# preview panes can play; without it the code falls back to OpenCV's mp4v,
+# which many viewers refuse.
+imageio>=2.31
+imageio-ffmpeg>=0.4.9
