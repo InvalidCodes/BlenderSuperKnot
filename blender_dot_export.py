@@ -47,21 +47,26 @@ def _parse_cli_overrides():
         print(f"CLI override: max segments -> {MAX_EXPORT_SEGMENTS}")
 
 
-_parse_cli_overrides()
-
 # 使用 "AUTO" 让脚本自动识别前缀；若你已知前缀，也可直接写如 "Mesh." 或 "Capsule."
 ROPE_PREFIX = "AUTO"
 
 # 物理参数
-ROPE_FRICTION = "0.2 0.005 0.0001"
-JOINT_DAMPING = "0.1"
+ROPE_FRICTION = os.environ.get("ROPE_FRICTION", "0.8 0.02 0.001")
+TABLE_FRICTION = os.environ.get("TABLE_FRICTION", "0.9 0.02 0.001")
+JOINT_DAMPING = float(os.environ.get("JOINT_DAMPING", "0.05"))
+JOINT_STIFFNESS = float(os.environ.get("JOINT_STIFFNESS", "0.002"))
 ROPE_DENSITY = "1000"
+TABLE_CLEARANCE = float(os.environ.get("TABLE_CLEARANCE", "0.0005"))
 # 默认段数：更像“绳”且算力不过分（可用环境变量/CLI 覆盖）
 MAX_EXPORT_SEGMENTS = int(os.environ.get("MAX_EXPORT_SEGMENTS", "120"))
 
+# Parse after defaults are initialized so --maxseg is not overwritten by the
+# default assignment above.
+_parse_cli_overrides()
+
 # 渲染参数（不影响物理）
 # 视觉外皮半径倍率：让绳子“看起来更粗”，但碰撞仍用物理半径 rope_r
-VISUAL_RADIUS_SCALE = float(os.environ.get("VISUAL_RADIUS_SCALE", "1.25"))
+VISUAL_RADIUS_SCALE = float(os.environ.get("VISUAL_RADIUS_SCALE", "1.0"))
 # 贴图：若提供文件路径则使用图片，否则自动尝试使用仓库里的 material/rope_01.png；
 # 若找不到则退回 builtin checker
 ROPE_TEXTURE_FILE = os.environ.get("ROPE_TEXTURE_FILE", "").strip()
@@ -488,10 +493,16 @@ def generate_mjcf_from_polyline(points, rope_r, step_len, name_prefix=""):
         indent = '\t\t' + '\t' * i
         body_xml += f'{indent}</body>\n'
 
-    # 邻接碰撞排除：只排除相邻段
+    # 邻接碰撞排除：相邻与次相邻 capsule 属于同一连续绳局部，急弯时
+    # 它们的圆头会自然重叠，不应被当作自碰撞。距离 >= 3 的段仍正常
+    # 参与绳结接触与摩擦。
     contact_xml = ""
-    for i in range(n - 1):
-        contact_xml += f'\t\t<exclude body1="{name_prefix}seg_{i:03d}" body2="{name_prefix}seg_{i+1:03d}"/>\n'
+    for gap in (1, 2):
+        for i in range(n - gap):
+            contact_xml += (
+                f'\t\t<exclude body1="{name_prefix}seg_{i:03d}" '
+                f'body2="{name_prefix}seg_{i+gap:03d}"/>\n'
+            )
 
     last_body_name = f"{name_prefix}seg_{n-1:03d}"
     return body_xml, points[0], points[-1], last_body_name, "", contact_xml
@@ -589,6 +600,7 @@ def main():
     mocap_blocks = []
     contact_blocks = []
     equality_welds = []
+    all_resampled = []
     for idx, pline in enumerate(polylines):
         name_prefix = f"rope{idx}_"
         base_step = max(seg_len_hint, rope_r * 2.0)
@@ -598,6 +610,7 @@ def main():
             resampled = _resample_polyline(pline, base_step)
         if len(resampled) > MAX_EXPORT_SEGMENTS:
             resampled = _downsample_points(resampled, MAX_EXPORT_SEGMENTS)
+        all_resampled.append(resampled)
         segment_step = _average_step(resampled)
         if segment_step <= 1e-6:
             segment_step = base_step
@@ -609,15 +622,31 @@ def main():
         body_blocks.append(mjcf_body_content)
         mocap_blocks.append(f"""
         <body name="{name_prefix}mocap_left" mocap="true" pos="{start_pos.x:.4f} {start_pos.y:.4f} {start_pos.z:.4f}">
-            <geom type="sphere" size="0.05" rgba="1 0 0 0.5" />
+            <geom type="sphere" size="0.05" rgba="1 0 0 0.5"
+                  contype="0" conaffinity="0" mass="0" />
         </body>
         <body name="{name_prefix}mocap_right" mocap="true" pos="{end_pos.x:.4f} {end_pos.y:.4f} {end_pos.z:.4f}">
-            <geom type="sphere" size="0.05" rgba="1 0 0 0.5" />
+            <geom type="sphere" size="0.05" rgba="1 0 0 0.5"
+                  contype="0" conaffinity="0" mass="0" />
         </body>
 """)
         contact_blocks.append(internal_contact_xml)
-        equality_welds.append(f'        <weld body1="{name_prefix}mocap_left" body2="{name_prefix}seg_000"/>')
-        equality_welds.append(f'        <weld body1="{name_prefix}mocap_right" body2="{last_body_name}"/>')
+        equality_welds.append(
+            f'        <weld name="{name_prefix}weld_left" '
+            f'body1="{name_prefix}mocap_left" body2="{name_prefix}seg_000" '
+            'solref="0.01 1" solimp="0.95 0.99 0.001"/>'
+        )
+        equality_welds.append(
+            f'        <weld name="{name_prefix}weld_right" '
+            f'body1="{name_prefix}mocap_right" body2="{last_body_name}" '
+            'solref="0.01 1" solimp="0.95 0.99 0.001"/>'
+        )
+
+    # 静态桌面恰好托住初始绳索的最低碰撞表面。这样既不会从半空坠落，
+    # 也不会像固定在 z=0 时那样让绳子一开始深度穿透桌面。
+    min_centerline_z = min(p.z for line in all_resampled for p in line)
+    table_z = min_centerline_z - rope_r - max(0.0, TABLE_CLEARANCE)
+    print(f"Physical table z={table_z:.4f}m (min centerline z={min_centerline_z:.4f}m)")
 
     # 说明：
     # - 本 exporter 的胶囊 geom 使用 fromto，长度由端点决定，不再依赖 size 的 half_length。
@@ -633,6 +662,7 @@ def main():
     </option>
 
     <visual>
+        <global offwidth=\"1920\" offheight=\"1080\" />
         <quality shadowsize=\"4096\" />
         <headlight ambient=\"0.25 0.25 0.25\" diffuse=\"0.7 0.7 0.7\" specular=\"0.2 0.2 0.2\" />
         <rgba haze=\"0.15 0.15 0.15 1\" />
@@ -651,7 +681,7 @@ def main():
     </asset>
 
     <default>
-        <joint damping=\"0.05\" />
+        <joint damping=\"{JOINT_DAMPING:.6g}\" stiffness=\"{JOINT_STIFFNESS:.6g}\" />
 
         <!-- 绳子碰撞层：只参与物理，不渲染（避免与视觉层叠加导致怪异高光/摩尔纹） -->
         <default class=\"rope_col\">
@@ -670,7 +700,11 @@ def main():
 
     <worldbody>
         <light pos=\"0 0 1\" dir=\"0 0 -1\" directional=\"true\" castshadow=\"true\" />
-        <geom type=\"plane\" size=\"1 1 0.1\" rgba=\".9 0 0 1\" />
+        <!-- 自动贴合绳子最低点的实体桌面：参与碰撞与摩擦。 -->
+        <geom name=\"table\" type=\"plane\" pos=\"0 0 {table_z:.6f}\"
+              size=\"2 2 0.1\" rgba=\".55 .32 .16 1\"
+              friction=\"{TABLE_FRICTION}\" contype=\"2\" conaffinity=\"1\"
+              solref=\"0.01 1\" solimp=\"0.95 0.99 0.001\" />
 """
 
     mocap_xml = "\n".join(mocap_blocks)
