@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superknot"
+version = "0.2.0"
+description = "ASCII knot diagrams to MuJoCo rope-tightening simulations, via Blender"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "mujoco>=3.0",
+    "numpy>=1.24",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+]
+
+[project.urls]
+Repository = "https://github.com/InvalidCodes/BlenderSuperKnot"
+
+[project.scripts]
+superknot = "superknot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["superknot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

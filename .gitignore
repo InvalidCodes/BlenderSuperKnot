@@ -1,0 +1,23 @@
+# Pipeline output
+build/
+results/
+artifacts/
+
+# Blender
+*.blend1
+*.blend2
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
