@@ -31,6 +31,7 @@ __all__ = [
     "Knot",
     "GaussCode",
     "centerlines",
+    "crossing_variants",
 ]
 
 Point = Tuple[float, float, float]
@@ -101,11 +102,13 @@ class GaussCode:
     ``sequences`` holds one signed-integer sequence per strand: ``+n`` when the
     strand passes over crossing ``n`` and ``-n`` when it passes under.
     Crossings are numbered from 1 in row-major order of the diagram.
+    ``signs`` maps each crossing to +1 (right-handed) or -1 (left-handed).
     """
 
     sequences: Tuple[Tuple[int, ...], ...]
     crossing_ids: Dict[Tuple[int, int], int]
     crossing_vertices: Dict[int, Tuple[int, ...]]
+    signs: Dict[int, int]
 
     @property
     def num_crossings(self) -> int:
@@ -298,7 +301,16 @@ class Knot:
             tuple(sequences),
             crossing_ids,
             {cid: tuple(v) for cid, v in sorted(crossing_vertices.items())},
+            {cid: self._crossing_sign(coord) for coord, cid in crossing_ids.items()},
         )
+
+    def _crossing_sign(self, coord: Tuple[int, int]) -> int:
+        """+1 if the under-strand runs to the left of the over-strand."""
+        entries = self.over_map[coord]
+        _, odx, ody, _ = next(e for e in entries if e[3] != -1)
+        _, udx, udy, _ = next(e for e in entries if e[3] == -1)
+        # Grid y points down, so flip it before taking the planar cross product.
+        return 1 if odx * -udy - (-ody) * udx > 0 else -1
 
     # -- geometry --------------------------------------------------------
 
@@ -342,3 +354,28 @@ def centerlines(
 ) -> List[List[Point]]:
     """Convenience wrapper: parse ``diagram`` and return its 3D centerlines."""
     return Knot(diagram).centerlines(z_depth=z_depth, z_bias=z_bias, scale=scale)
+
+
+_SWITCH = {"-": "|", "|": "-"}
+
+
+def crossing_variants(diagram: str) -> Iterator[str]:
+    """Every over/under assignment of ``diagram``'s shadow, ``2**n`` in all.
+
+    A crossing is switched by swapping the ``-``/``|`` drawn in its cell, so
+    each variant is itself a valid diagram.  The first one yielded has every
+    horizontal strand on top; it is the same for all diagrams that share a
+    shadow, which makes it usable as a key for the shadow.
+    """
+    cells = sorted(Knot(diagram).gauss_code().crossing_ids, key=lambda c: (c[1], c[0]))
+    grid = [list(line) for line in diagram.splitlines()]
+    for x, y in cells:
+        if grid[y][x] not in _SWITCH:
+            raise KnotException(f"Crossing at {x},{y} is drawn as {grid[y][x]!r}, not - or |")
+        grid[y][x] = "-"
+    for mask in range(1 << len(cells)):
+        variant = [row[:] for row in grid]
+        for bit, (x, y) in enumerate(cells):
+            if mask >> bit & 1:
+                variant[y][x] = "|"
+        yield "\n".join("".join(row) for row in variant)

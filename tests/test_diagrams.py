@@ -9,9 +9,9 @@ import math
 import pytest
 
 from superknot import knots, presets
-from superknot.ascii_diagram import Knot, KnotException
+from superknot.ascii_diagram import Knot, KnotException, crossing_variants
 from superknot.knots.base import AsciiAsset
-from superknot.topology import coloring_dimension, is_colorable
+from superknot.topology import alexander_polynomial, coloring_dimension, is_colorable
 
 
 def _alternating(sequence):
@@ -126,6 +126,46 @@ def test_switching_a_crossing_unknots_the_trefoil():
     assert [abs(v) for v in trefoil] == [abs(v) for v in unknot]
     assert is_colorable(trefoil, 3)
     assert not is_colorable(unknot, 3)
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("curl_r1", (1,)),
+        ("unknot_3x", (1,)),
+        ("trefoil", (1, -1, 1)),
+        ("figure_eight", (1, -3, 1)),
+    ],
+)
+def test_alexander_polynomial_identifies_the_knot(name, expected):
+    gauss = knots.get(name).trace().gauss_code()
+    assert alexander_polynomial(gauss.sequences[0], gauss.signs) == expected
+
+
+def test_crossing_variants_cover_every_assignment_of_the_shadow():
+    trefoil = knots.get("trefoil").diagram
+    variants = list(crossing_variants(trefoil))
+    assert len(variants) == 2 ** 3
+    assert trefoil in variants and knots.get("unknot_3x").diagram in variants
+    codes = {Knot(v).gauss_code().to_string() for v in variants}
+    assert len(codes) == len(variants)
+    # Of the eight, exactly the two alternating ones (left and right) knot.
+    polys = [
+        alexander_polynomial(g.sequences[0], g.signs)
+        for g in (Knot(v).gauss_code() for v in variants)
+    ]
+    assert polys.count((1, -1, 1)) == 2 and polys.count((1,)) == 6
+
+
+def test_alexander_polynomial_agrees_with_fox_colouring():
+    """|Delta(-1)| is the determinant; p divides it iff the knot is p-colourable."""
+    for variant in crossing_variants(knots.get("figure_eight").diagram):
+        gauss = Knot(variant).gauss_code()
+        poly = alexander_polynomial(gauss.sequences[0], gauss.signs)
+        assert poly == poly[::-1]
+        determinant = abs(sum(c * (-1) ** i for i, c in enumerate(poly)))
+        for p in (3, 5, 7):
+            assert is_colorable(gauss.sequences[0], p) == (determinant % p == 0)
 
 
 # -- registry and presets -------------------------------------------------

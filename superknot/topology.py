@@ -16,6 +16,10 @@ The table lists the dimension of the colouring space.  Dimension 1 means only
 the ``p`` trivial (all-arcs-same-colour) solutions exist; dimension 2 means the
 knot is *p*-colourable and therefore not the unknot.
 
+Colourings are a one-way test.  :func:`alexander_polynomial` is the finer
+invariant used to count how many knot types a family of diagrams spans:
+distinct polynomials certify distinct knots (up to mirror image).
+
 Only the closure of an open rope has a Gauss code in the usual sense, so the
 sequence is read cyclically — matching the ``closure_convention`` recorded on
 the assets.
@@ -23,9 +27,15 @@ the assets.
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
-__all__ = ["arcs_of", "coloring_matrix", "coloring_dimension", "is_colorable"]
+__all__ = [
+    "arcs_of",
+    "coloring_matrix",
+    "coloring_dimension",
+    "is_colorable",
+    "alexander_polynomial",
+]
 
 
 def arcs_of(sequence: Sequence[int]) -> List[int]:
@@ -113,3 +123,79 @@ def coloring_dimension(sequence: Sequence[int], p: int) -> int:
 
 def is_colorable(sequence: Sequence[int], p: int) -> bool:
     return coloring_dimension(sequence, p) >= 2
+
+
+# Evaluating at t = 2**BITS packs the polynomial's coefficients into the digits
+# of one big integer (Kronecker substitution), so a single exact integer
+# determinant recovers all of them.  48 bits is far beyond the coefficient
+# sizes of any diagram that fits on a screen.
+_KRONECKER_BITS = 48
+
+
+def _determinant(matrix: List[List[int]]) -> int:
+    """Exact integer determinant by fraction-free (Bareiss) elimination."""
+    m = [row[:] for row in matrix]
+    n = len(m)
+    sign, previous = 1, 1
+    for k in range(n - 1):
+        if m[k][k] == 0:
+            swap = next((r for r in range(k + 1, n) if m[r][k]), None)
+            if swap is None:
+                return 0
+            m[k], m[swap] = m[swap], m[k]
+            sign = -sign
+        for i in range(k + 1, n):
+            for j in range(k + 1, n):
+                m[i][j] = (m[i][j] * m[k][k] - m[i][k] * m[k][j]) // previous
+        previous = m[k][k]
+    return sign * m[n - 1][n - 1]
+
+
+def alexander_polynomial(sequence: Sequence[int], signs: Dict[int, int]) -> Tuple[int, ...]:
+    """Alexander polynomial of the closure, coefficients from ``t**0`` up.
+
+    ``signs`` maps each crossing to +1/-1, as in ``GaussCode.signs``.  The
+    result is normalised to no factor of ``t`` and a positive leading
+    coefficient; the unknot gives ``(1,)``, the trefoil ``(1, -1, 1)``.  A knot
+    and its mirror image share a polynomial.
+    """
+    n = len(sequence)
+    arc_at = arcs_of(sequence)
+    over_arc: Dict[int, int] = {}
+    under_pos: Dict[int, int] = {}
+    for i, value in enumerate(sequence):
+        if value > 0:
+            over_arc[value] = arc_at[i]
+        else:
+            under_pos[-value] = i
+
+    # Fox derivatives of the Wirtinger relation at each crossing, at t = 2**B.
+    t = 1 << _KRONECKER_BITS
+    rows = []
+    for crossing in sorted(under_pos):
+        position = under_pos[crossing]
+        incoming, outgoing = arc_at[position], arc_at[(position + 1) % n]
+        if signs[crossing] < 0:
+            incoming, outgoing = outgoing, incoming
+        row = [0] * (max(arc_at) + 1)
+        row[over_arc[crossing]] += 1 - t
+        row[incoming] += t
+        row[outgoing] -= 1
+        rows.append(row)
+    if len(rows) <= 1:
+        return (1,)
+    value = _determinant([row[:-1] for row in rows[:-1]])
+
+    # Read the coefficients back as balanced base-2**B digits.
+    coefficients = []
+    while value:
+        digit = value & (t - 1)
+        if digit >= t // 2:
+            digit -= t
+        coefficients.append(digit)
+        value = (value - digit) >> _KRONECKER_BITS
+    while coefficients and coefficients[0] == 0:
+        coefficients.pop(0)
+    if coefficients[-1] < 0:
+        coefficients = [-c for c in coefficients]
+    return tuple(coefficients)

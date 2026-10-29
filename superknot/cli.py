@@ -2,6 +2,7 @@
 
     python -m superknot list                      # every knot and preset
     python -m superknot show trefoil              # diagram + Gauss code, no Blender
+    python -m superknot variants --all            # count every crossing assignment
     python -m superknot build trefoil             # -> build/trefoil.blend
     python -m superknot export trefoil            # -> build/trefoil.xml
     python -m superknot simulate trefoil          # -> results/trefoil.mp4
@@ -19,10 +20,12 @@ import json
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import List, Optional
 
 from . import knots, presets, topology
+from .ascii_diagram import Knot, crossing_variants
 from .knots.base import AsciiAsset
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -155,6 +158,44 @@ def cmd_show(args) -> int:
             )
             print(f"  {'fox_colouring':<24} {dims}  {verdict}")
         print()
+    return 0
+
+
+def cmd_variants(args) -> int:
+    """Switch every crossing of every ASCII shadow and count what comes out.
+
+    Each distinct Alexander polynomial is a distinct knot type, so the number
+    of polynomials is a certified lower bound on the knot types a shadow spans.
+    """
+    shadows = {}
+    for asset in _resolve_assets(args):
+        if isinstance(asset, AsciiAsset):
+            key = next(crossing_variants(asset.diagram))
+            shadows.setdefault(key, []).append(asset.name)
+
+    print(f"{'shadow':<26} {'crossings':>9} {'diagrams':>9} {'knotted':>8} {'polys':>6}")
+    total, knotted_total, polys_total = 0, 0, Counter()
+    for key, names in shadows.items():
+        polys = Counter()
+        diagrams = 0
+        for variant in crossing_variants(key):
+            gauss = Knot(variant).gauss_code()
+            diagrams += 1
+            if gauss.num_components == 1:
+                polys[topology.alexander_polynomial(gauss.sequences[0], gauss.signs)] += 1
+        knotted = sum(polys.values()) - polys[(1,)]
+        total += diagrams
+        knotted_total += knotted
+        polys_total.update(polys)
+        crossings = diagrams.bit_length() - 1
+        print(f"{' = '.join(names):<26} {crossings:>9} {diagrams:>9,} {knotted:>8,} "
+              f"{len(polys) or '-':>6}")
+    print(f"{'total':<26} {'':>9} {total:>9,} {knotted_total:>8,} {len(polys_total):>6}")
+
+    print(f"\n'knotted' = Alexander polynomial is not 1, which proves the closure is "
+          f"knotted.\nMost common polynomials (coefficients from t^0 up):")
+    for poly, count in polys_total.most_common(args.top):
+        print(f"  {str(list(poly)):<24} {count:>7,}")
     return 0
 
 
@@ -325,6 +366,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("show", help="print a knot's diagram, Gauss code and metadata")
     add_selection(p)
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser(
+        "variants", help="enumerate every over/under assignment of ASCII knots"
+    )
+    add_selection(p)
+    p.add_argument("--top", type=int, default=12, help="polynomials to list")
+    p.set_defaults(func=cmd_variants)
 
     p = sub.add_parser("build", help="asset -> .blend (needs Blender)")
     add_selection(p)
