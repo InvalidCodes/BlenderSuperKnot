@@ -249,6 +249,8 @@ def cmd_export(args) -> int:
                 "--joint-stiffness", str(cfg.joint_stiffness),
                 "--rope-density", str(cfg.rope_density),
                 "--table-clearance", str(cfg.table_clearance),
+                "--contact-solref", cfg.contact_solref,
+                "--contact-solimp", cfg.contact_solimp,
                 "--visual-radius-scale", str(cfg.visual_radius_scale),
                 "--visual-overlap-frac", str(cfg.visual_overlap_frac),
                 "--texture-repeat-u", str(cfg.texture_repeat_u),

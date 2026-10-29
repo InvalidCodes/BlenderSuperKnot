@@ -9,7 +9,7 @@
 ![Blender](https://img.shields.io/badge/Blender-4.x-E87D0D?logo=blender&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-<img src="docs/media/reef_knot.gif" width="690" alt="Two ropes joined by a reef knot are pulled from all four ends and cinch tight in MuJoCo">
+<img src="docs/media/reef_knot.gif" width="100%" alt="Two ropes joined by a reef knot are pulled from all four ends and cinch tight in MuJoCo">
 
 <sub>Two ropes joined by a reef knot. MuJoCo pulls all four ends and the knot cinches tight. · <a href="docs/media/reef_knot.mp4">MP4</a></sub>
 
@@ -32,7 +32,7 @@ a video, quantitative metrics, and a machine-checked label saying which knot it 
 
 ## ASCII in, rope out
 
-<img src="docs/media/trefoil.gif" width="840" alt="Left: the trefoil drawn in ASCII. Right: the same rope in MuJoCo, pulled tight into an overhand knot">
+<img src="docs/media/trefoil.gif" width="100%" alt="Left: the trefoil drawn in ASCII. Right: the same rope in MuJoCo, pulled tight into an overhand knot">
 
 This is the entire input for the knot above:
 
@@ -99,25 +99,28 @@ several ropes in one drawing.
 
 ## Physical tightening
 
-<img src="docs/media/complex15x.gif" width="840" alt="Left: a 15-crossing ASCII drawing. Right: the rope it describes, pulled by both ends until all fifteen crossings cinch into a tight tangle">
+<img src="docs/media/complex15x.gif" width="100%" alt="Left: a 15-crossing ASCII drawing. Right: the rope it describes, pulled by both ends until all fifteen crossings cinch into a tight tangle">
 
 The same endpoint pull gives very different outcomes depending on the topology, and the
-simulator reports which outcome happened instead of just running for a fixed time:
+simulator reports which outcome happened instead of just running for a fixed time
+(`distance_cap` means the tangle was still sliding inward when the 1.7 m pull limit ran out):
 
 | knot | what happens | stop reason | pulled per end | peak force | arc / chord |
 |---|---|---|---:|---:|---:|
-| `trefoil` | cinches into a tight overhand knot | `taut` | 0.19 m | 15.0 N | 2.07 |
-| `complex15x` | 15 crossings collapse into one hard tangle | `taut` | 0.51 m | 10.9 N | 4.82 |
+| `trefoil` | cinches into a tight overhand knot | `taut` | 0.38 m | 22.6 N | 1.29 |
+| `complex15x` | 15 crossings draw in toward one dense core | `distance_cap` | 1.70 m | 15.2 N | 1.83 |
 | `slip_knot` | the curl runs out and the rope comes straight | `taut` | 1.16 m | 12.6 N | **1.00** |
 
 <p align="center">
-<img src="docs/media/slip_knot.gif" width="560" alt="A slip knot pulled from both ends releases into a straight rope"><br>
+<img src="docs/media/slip_knot.gif" width="720" alt="A slip knot pulled from both ends releases into a straight rope"><br>
 <sub>The slip knot is the control case. The same pull that cinches a real knot releases a removable curl.</sub>
 </p>
 
 **How it works.** The rope is a chain of capsules joined by ball joints, with self-contact
 on and friction on every contact. Each end is welded to a mocap handle that moves outward
-along the rope's tangent. The pull stops when the smoothed weld tension stays above a
+along the rope's tangent. The pull is slow (0.1 m/s), so the knot sets the tension rather
+than the rope's own inertia. Rope-on-rope contact is stiff enough that strands cannot pass
+through each other even at 60 N. The pull stops when the smoothed weld tension stays above a
 threshold (`taut`), or when a hard force ceiling trips (`safety_limit`), which means the
 rope jammed. *Arc / chord* is rope length over end-to-end distance: 1.0 is a straight
 rope, and a big value means a lot of rope is locked inside the knot.
@@ -129,15 +132,16 @@ the height of one crossing (`right_trefoil` vs `three_crossing_unknot`), then pu
 
 | asset | knot type | pulled (m) | peak force (N) | arc / chord | stop reason |
 |---|---|---:|---:|---:|---|
-| `right_trefoil` | 3₁ | 0.362 | 80.2 | 3.91 | `safety_limit` |
-| `three_crossing_unknot` | unknot | 0.368 | 80.2 | 3.89 | `safety_limit` |
-| `left_trefoil` | 3₁ mirror | 0.422 | 80.8 | 3.30 | `safety_limit` |
-| `right_trefoil_r1` | 3₁, 4-crossing view | 0.242 | 80.7 | 6.45 | `safety_limit` |
-| `right_trefoil_r2` | 3₁, 5-crossing view | 0.771 | 80.5 | 1.74 | `safety_limit` |
-| `right_trefoil_r3` | 3₁, 3-crossing view | 0.316 | 80.5 | 4.59 | `safety_limit` |
+| `right_trefoil` | 3₁ | 0.343 | 90.0 | 4.15 | `safety_limit` |
+| `three_crossing_unknot` | unknot | 0.349 | 83.8 | 4.12 | `safety_limit` |
+| `left_trefoil` | 3₁ mirror | 0.366 | 89.8 | 3.86 | `safety_limit` |
+| `right_trefoil_r1` | 3₁, 4-crossing view | 0.239 | 90.9 | 6.55 | `safety_limit` |
+| `right_trefoil_r2` | 3₁, 5-crossing view | 0.052 | 94.1 | 90.8 | `safety_limit` |
+| `right_trefoil_r3` | 3₁, 3-crossing view | 0.310 | 89.8 | 4.70 | `safety_limit` |
 
-The unknot jams just as hard as the trefoil it shares a shadow with: 0.368 m against 0.362 m
-pulled, arc/chord 3.89 against 3.91. Friction and self-contact lock the rope before
+The unknot jams just as hard as the trefoil it shares a shadow with: 0.349 m against 0.343 m
+pulled, arc/chord 4.12 against 4.15. (`r2` jams almost at once, so its ends, which start
+close together, barely separate.) Friction and self-contact lock the rope before
 topology gets a say. So any claim that a policy "unties knots by pulling the ends" has to
 beat this trivial control first. Reproduce it with
 `python -m superknot run --family topology_controls`.

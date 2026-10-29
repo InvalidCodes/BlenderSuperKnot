@@ -63,6 +63,8 @@ def parse_args(argv=None):
     phys.add_argument("--joint-stiffness", type=float, default=0.002)
     phys.add_argument("--rope-density", type=float, default=1000.0)
     phys.add_argument("--table-clearance", type=float, default=0.0005)
+    phys.add_argument("--contact-solref", default="0.005 1")
+    phys.add_argument("--contact-solimp", default="0.95 0.99 0.001")
 
     look = parser.add_argument_group("appearance (no effect on physics)")
     look.add_argument("--visual-radius-scale", type=float, default=1.0)
@@ -386,7 +388,7 @@ def assemble_mjcf(bodies, mocaps, welds, contacts, table_z, texture, args):
                   friction="{args.rope_friction}" density="{args.rope_density:.6g}"
                   contype="1" conaffinity="1"
                   rgba="0 0 0 0"
-                  solref="0.02 1" solimp="0.9 0.95 0.001" />
+                  solref="{args.contact_solref}" solimp="{args.contact_solimp}" />
         </default>
 
         <!-- Visual layer: drawn only, no collision and no mass. -->

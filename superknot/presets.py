@@ -29,6 +29,11 @@ class ExportConfig:
     rope_density: float = 1000.0
     #: Gap between the rope's lowest point and the table plane, in metres.
     table_clearance: float = 0.0005
+    #: Rope-rope contact softness.  A 0.02 s time constant let strands pass
+    #: through each other above ~30 N, so a hard pull untied knots; 0.005 s
+    #: holds a trefoil intact at 60 N.
+    contact_solref: str = "0.005 1"
+    contact_solimp: str = "0.95 0.99 0.001"
     #: Visual-only: skin radius multiplier and seam overlap fraction.
     visual_radius_scale: float = 1.0
     visual_overlap_frac: float = 0.02
@@ -57,18 +62,20 @@ class SimConfig:
     pull_distance: float = 1.20
     #: Runaway guard in taut mode: never pull further than this per endpoint.
     max_pull_distance: float = 1.70
-    #: Metres the mocap target advances per step.
-    pull_speed: float = 0.00030
+    #: Metres the mocap target advances per step: 0.1 m/s at the default
+    #: timestep.  Pull much faster and rope inertia alone trips `taut_force`
+    #: while the knot is still loose.
+    pull_speed: float = 0.00005
 
     #: Taut when the filtered weld tension holds above this for N steps.
-    taut_force: float = 10.0
+    taut_force: float = 20.0
     taut_hold_steps: int = 20
     #: EMA factor applied to weld tension; small values reject collision spikes.
     taut_force_ema_alpha: float = 0.02
 
     #: Safety limits.  Deliberately above `taut_force`: these protect the
     #: flexible weld, they are not the normal completion condition.
-    max_pull_force: float = 30.0
+    max_pull_force: float = 60.0
     max_endpoint_error: float = 0.04
     force_limit_hold_steps: int = 20
     #: Stop pulling every rope as soon as any one of them goes taut.
