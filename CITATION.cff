@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "BlenderSuperKnot: ASCII knot diagrams to physically simulated ropes"
+authors:
+  - family-names: Ge
+    given-names: Yunfei
+version: 0.3.0
+date-released: 2026-10-29
+license: MIT
+repository-code: "https://github.com/InvalidCodes/BlenderSuperKnot"
+keywords:
+  - knot theory
+  - rope simulation
+  - MuJoCo
+  - Blender

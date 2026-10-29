@@ -7,7 +7,7 @@
 ![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)
 ![MuJoCo](https://img.shields.io/badge/physics-MuJoCo%203-0A7BBB)
 ![Blender](https://img.shields.io/badge/Blender-4.x-E87D0D?logo=blender&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-39%20passing-2EA44F)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 <img src="docs/media/reef_knot.gif" width="690" alt="Two ropes joined by a reef knot are pulled from all four ends and cinch tight in MuJoCo">
 
@@ -164,7 +164,7 @@ tell a trefoil from an unknot *from the physics alone*.
 ```bash
 git clone https://github.com/InvalidCodes/BlenderSuperKnot.git
 cd BlenderSuperKnot
-pip install -r requirements.txt          # MuJoCo stage; Blender 4.0+ must be on PATH
+pip install -e ".[sim]"                  # MuJoCo stage; Blender 4.0+ must be on PATH
 
 python -m superknot list                 # every knot and every preset
 python -m superknot show trefoil         # diagram, Gauss code, invariants (pure Python)
@@ -172,8 +172,8 @@ python -m superknot variants --all       # the diversity census above (pure Pyth
 python -m superknot run trefoil          # build -> export -> simulate
 ```
 
-The diagram, Gauss-code and invariant layer is plain Python with no dependencies at all.
-`show` and `variants` work on a bare interpreter.
+The diagram, Gauss-code and invariant layer is plain Python with no dependencies at all:
+`pip install -e .` without `[sim]` is enough for `show` and `variants`.
 
 | Output | Stage |
 |---|---|
@@ -361,8 +361,12 @@ invariants, crossing-variant enumeration, and the registry/preset contracts.
 | `crossings=0` from a new diagram | the drawing has a closed loop with no free end, so it is never traced |
 | `diagram traces N crossings, expected M` | the diagram and its `expected_crossings` disagree; check with `show` |
 | `Only a freejoint was found` | the exporter produced no ball joints; the input curve had < 2 points |
-| `invalid value for MUJOCO_GL: egl` on macOS | run with `MUJOCO_GL=cgl` |
 | video will not play in a browser | `imageio-ffmpeg` is missing, so the OpenCV/`mp4v` fallback was used |
 | `stop_reason: safety_limit` | the rope jammed instead of tightening; this is a result, not a failure |
 
 </details>
+
+## License and citation
+
+MIT, see [LICENSE](LICENSE). If this is useful in your work, GitHub's *Cite this
+repository* button gives a ready-made reference from [CITATION.cff](CITATION.cff).

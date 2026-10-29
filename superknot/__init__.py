@@ -13,6 +13,6 @@ and the MuJoCo simulator is plain Python:
 Importing this package never imports `bpy` or `mujoco`.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["__version__"]

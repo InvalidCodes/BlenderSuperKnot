@@ -28,10 +28,11 @@ from . import knots, presets, topology
 from .ascii_diagram import Knot, crossing_variants
 from .knots.base import AsciiAsset
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-BUILD_DIR = REPO_ROOT / "build"
-RESULTS_DIR = REPO_ROOT / "results"
-BLENDER_SCRIPTS = REPO_ROOT / "superknot" / "blender"
+# Outputs go under the working directory, so an installed package never writes
+# into site-packages.
+BUILD_DIR = Path.cwd() / "build"
+RESULTS_DIR = Path.cwd() / "results"
+BLENDER_SCRIPTS = Path(__file__).resolve().parent / "blender"
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +193,8 @@ def cmd_variants(args) -> int:
               f"{len(polys) or '-':>6}")
     print(f"{'total':<26} {'':>9} {total:>9,} {knotted_total:>8,} {len(polys_total):>6}")
 
-    print(f"\n'knotted' = Alexander polynomial is not 1, which proves the closure is "
-          f"knotted.\nMost common polynomials (coefficients from t^0 up):")
+    print("\n'knotted' = Alexander polynomial is not 1, which proves the closure is "
+          "knotted.\nMost common polynomials (coefficients from t^0 up):")
     for poly, count in polys_total.most_common(args.top):
         print(f"  {str(list(poly)):<24} {count:>7,}")
     return 0

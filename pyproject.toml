@@ -4,16 +4,33 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "superknot"
-version = "0.2.0"
+version = "0.3.0"
 description = "ASCII knot diagrams to MuJoCo rope-tightening simulations, via Blender"
 readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Yunfei Ge" }]
 requires-python = ">=3.9"
-dependencies = [
+keywords = ["knot theory", "rope simulation", "MuJoCo", "Blender", "deformable objects"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+# The diagram, Gauss-code and invariant layer needs nothing; only the MuJoCo
+# stage does.
+dependencies = []
+
+[project.optional-dependencies]
+sim = [
     "mujoco>=3.0",
     "numpy>=1.24",
     "imageio>=2.31",
     "imageio-ffmpeg>=0.4.9",
 ]
+dev = ["pytest>=7"]
 
 [project.urls]
 Repository = "https://github.com/InvalidCodes/BlenderSuperKnot"

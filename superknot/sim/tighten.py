@@ -36,8 +36,12 @@ import numpy as np
 from superknot import presets
 
 # MuJoCo picks its GL backend at import time, so this has to happen first.
+# macOS has no EGL and rejects MUJOCO_GL=egl at import; CGL renders offscreen.
 if "MUJOCO_GL" not in os.environ:
-    os.environ["MUJOCO_GL"] = "glfw" if os.environ.get("DISPLAY") else "egl"
+    if sys.platform == "darwin":
+        os.environ["MUJOCO_GL"] = "cgl"
+    else:
+        os.environ["MUJOCO_GL"] = "glfw" if os.environ.get("DISPLAY") else "egl"
 
 import mujoco as mj  # noqa: E402
 
@@ -420,7 +424,9 @@ def open_video_writer(path: str, fps: float, width: int, height: int):
             path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
         )
         if not writer.isOpened():
-            raise SystemExit(f"No usable MP4 backend (imageio: {imageio_error})")
+            raise SystemExit(
+                f"No usable MP4 backend (imageio: {imageio_error})"
+            ) from None
         print(f"Video backend: OpenCV/mp4v (imageio unavailable: {imageio_error})")
         return (
             lambda frame: writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)),
